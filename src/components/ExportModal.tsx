@@ -6,8 +6,10 @@ import {
   X,
   FolderOpen,
   Cpu,
+  ChevronDown,
 } from 'lucide-react';
 import { useProjectStore } from '../store/useProjectStore';
+import { apiUrl } from '../config/api';
 import {
   getResolutionForRatio,
   renderProjectFrameToCanvas,
@@ -57,7 +59,7 @@ class SequentialVideoFrameReader {
       width: String(maxWidth),
       height: String(maxHeight),
     });
-    const res = await fetch(`/api/export/decode-clip-frames?${params.toString()}`);
+    const res = await fetch(apiUrl(`/api/export/decode-clip-frames?${params.toString()}`));
     if (!res.ok || !res.body) {
       throw new Error(`No se pudo iniciar la decodificación secuencial de ${filePath}`);
     }
@@ -238,7 +240,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose }) => 
     const currentExpId = activeExportIdRef.current;
     if (currentExpId) {
       try {
-        await fetch('/api/export/cancel', {
+        await fetch(apiUrl('/api/export/cancel'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ exportId: currentExpId }),
@@ -254,7 +256,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose }) => 
 
   const handleOpenFolder = async (targetPath: string) => {
     try {
-      await fetch('/api/fs/open-folder', {
+      await fetch(apiUrl('/api/fs/open-folder'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ path: targetPath }),
@@ -353,7 +355,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose }) => 
 
       if (cancelRequestedRef.current) return;
 
-      const startRes = await fetch('/api/export/start', {
+      const startRes = await fetch(apiUrl('/api/export/start'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ fps, useGpu }),
@@ -446,7 +448,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose }) => 
           }
 
           const batchRes = await fetch(
-            `/api/export/frames?exportId=${encodeURIComponent(exportId)}&count=${countInBatch}`,
+            apiUrl(`/api/export/frames?exportId=${encodeURIComponent(exportId)}&count=${countInBatch}`),
             {
               method: 'POST',
               headers: { 'Content-Type': 'application/octet-stream' },
@@ -500,7 +502,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose }) => 
         })
         .filter((item) => Boolean(item.path));
 
-      const finRes = await fetch('/api/export/finalize', {
+      const finRes = await fetch(apiUrl('/api/export/finalize'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -716,14 +718,22 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose }) => 
               <div className="grid grid-cols-2 gap-3">
                 <div className="space-y-1.5">
                   <label className="text-gray-300 font-medium">Resolución</label>
-                  <select
-                    value={qualityScale}
-                    onChange={(e) => setQualityScale(Number(e.target.value) as 1 | 0.6667)}
-                    className="w-full px-3 py-2 rounded-xl bg-[#18191c] border border-[#32343a] text-xs text-white focus:outline-none focus:border-[#00d4e5]"
-                  >
-                    <option value={1}>1080p Full HD ({finalW}×{finalH})</option>
-                    <option value={0.6667}>720p HD Rápido</option>
-                  </select>
+                  <div className="relative">
+                    <select
+                      value={qualityScale}
+                      onChange={(e) => setQualityScale(Number(e.target.value) as 1 | 0.6667)}
+                      className="w-full appearance-none pl-3 pr-8 py-2 rounded-xl bg-[#18191c] border border-[#32343a] text-xs text-white focus:outline-none focus:border-[#00d4e5] cursor-pointer"
+                      style={{ colorScheme: 'dark' }}
+                    >
+                      <option value={1} className="bg-[#18191c] text-white">
+                        1080p Full HD ({finalW}×{finalH})
+                      </option>
+                      <option value={0.6667} className="bg-[#18191c] text-white">
+                        720p HD Rápido
+                      </option>
+                    </select>
+                    <ChevronDown className="w-4 h-4 text-gray-400 absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                  </div>
                 </div>
 
                 <div className="space-y-1.5">

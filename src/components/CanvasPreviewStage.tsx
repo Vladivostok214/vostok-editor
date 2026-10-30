@@ -7,6 +7,7 @@ import {
   Square,
 } from 'lucide-react';
 import { useProjectStore } from '../store/useProjectStore';
+import { apiUrl } from '../config/api';
 import { computeTrackOverlaps } from './TimelinePanel';
 import type { AspectRatio, MediaAsset, ProjectData, TimelineClip } from '../types/project';
 
@@ -187,7 +188,13 @@ export function drawSingleClipToContext(
     baseHeight = srcH * fitScale;
 
     try {
-      ctx.drawImage(mediaSource, -baseWidth / 2, -baseHeight / 2, baseWidth, baseHeight);
+      if (mediaSource instanceof HTMLVideoElement) {
+        if (mediaSource.readyState >= 2 && mediaSource.videoWidth > 0 && mediaSource.videoHeight > 0) {
+          ctx.drawImage(mediaSource, -baseWidth / 2, -baseHeight / 2, baseWidth, baseHeight);
+        }
+      } else {
+        ctx.drawImage(mediaSource, -baseWidth / 2, -baseHeight / 2, baseWidth, baseHeight);
+      }
     } catch {
       // Ignore if media frame is not decoded yet
     }
@@ -355,6 +362,7 @@ export const CanvasPreviewStage: React.FC = () => {
 
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const videoPoolContainerRef = useRef<HTMLDivElement | null>(null);
   const mediaElementsRef = useRef<Map<string, HTMLVideoElement | HTMLImageElement>>(new Map());
   const audioElementsRef = useRef<Map<string, HTMLAudioElement>>(new Map());
   const lastBoxesRef = useRef<ClipVisualBox[]>([]);
@@ -394,7 +402,11 @@ export const CanvasPreviewStage: React.FC = () => {
       if (!currentClipIds.has(id)) {
         if (el instanceof HTMLVideoElement) {
           el.pause();
-          el.src = '';
+          el.removeAttribute('src');
+          el.load();
+          if (el.parentNode) {
+            el.parentNode.removeChild(el);
+          }
         }
         mediaElementsRef.current.delete(id);
       }
@@ -402,7 +414,8 @@ export const CanvasPreviewStage: React.FC = () => {
     for (const [id, el] of audioElementsRef.current.entries()) {
       if (!currentClipIds.has(id)) {
         el.pause();
-        el.src = '';
+        el.removeAttribute('src');
+        el.load();
         audioElementsRef.current.delete(id);
       }
     }
@@ -416,22 +429,41 @@ export const CanvasPreviewStage: React.FC = () => {
 
       if (clip.type === 'video' && !mediaElementsRef.current.has(clip.id)) {
         const vid = document.createElement('video');
-        vid.src = asset.url;
+        vid.src = apiUrl(asset.url);
         vid.preload = 'auto';
         vid.muted = true;
         vid.playsInline = true;
         vid.crossOrigin = 'anonymous';
-        vid.addEventListener('loadeddata', () => setTickRender((n) => n + 1));
-        vid.addEventListener('seeked', () => setTickRender((n) => n + 1));
+        vid.style.position = 'absolute';
+        vid.style.width = '1px';
+        vid.style.height = '1px';
+        vid.style.opacity = '0.001';
+        vid.style.pointerEvents = 'none';
+
+        const onFrameReady = () => setTickRender((n) => n + 1);
+        vid.addEventListener('loadeddata', onFrameReady);
+        vid.addEventListener('canplay', onFrameReady);
+        vid.addEventListener('seeked', onFrameReady);
+        vid.addEventListener('timeupdate', onFrameReady);
+        vid.addEventListener('loadedmetadata', () => {
+          if (vid.currentTime === 0) {
+            vid.currentTime = 0.001;
+          }
+          setTickRender((n) => n + 1);
+        });
+
+        if (videoPoolContainerRef.current) {
+          videoPoolContainerRef.current.appendChild(vid);
+        }
         mediaElementsRef.current.set(clip.id, vid);
       } else if (clip.type === 'image' && !mediaElementsRef.current.has(clip.id)) {
         const img = new Image();
-        img.src = asset.url;
+        img.src = apiUrl(asset.url);
         img.crossOrigin = 'anonymous';
         img.onload = () => setTickRender((n) => n + 1);
         mediaElementsRef.current.set(clip.id, img);
       } else if (clip.type === 'audio' && !audioElementsRef.current.has(clip.id)) {
-        const aud = new Audio(asset.url);
+        const aud = new Audio(apiUrl(asset.url));
         aud.preload = 'auto';
         audioElementsRef.current.set(clip.id, aud);
       }
@@ -870,6 +902,22 @@ export const CanvasPreviewStage: React.FC = () => {
           )}
         </div>
       )}
+
+      {/* Hidden DOM video elements pool required by WebKitGTK to decode video frames reliably */}
+      <div
+        ref={videoPoolContainerRef}
+        aria-hidden="true"
+        style={{
+          position: 'fixed',
+          top: -9999,
+          left: -9999,
+          width: '1px',
+          height: '1px',
+          opacity: 0.001,
+          pointerEvents: 'none',
+          overflow: 'hidden',
+        }}
+      />
     </div>
   );
 };

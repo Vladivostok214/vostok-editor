@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { apiUrl } from '../config/api';
 import type {
   AspectRatio,
   MediaAsset,
@@ -284,7 +285,7 @@ export function packMainTrackClips(
 }
 
 async function persistProjectToDisk(project: ProjectData): Promise<ProjectData> {
-  const res = await fetch('/api/projects', {
+  const res = await fetch(apiUrl('/api/projects'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(project),
@@ -323,7 +324,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
 
   fetchSystemStatus: async () => {
     try {
-      const res = await fetch('/api/system/status');
+      const res = await fetch(apiUrl('/api/system/status'));
       if (!res.ok) throw new Error('Error consultando estado del sistema');
       const data: SystemStatus = await res.json();
       set({ systemStatus: data });
@@ -335,7 +336,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   fetchProjects: async () => {
     set({ isLoading: true });
     try {
-      const res = await fetch('/api/projects');
+      const res = await fetch(apiUrl('/api/projects'));
       if (!res.ok) throw new Error('Error listando proyectos');
       const data = await res.json();
       set({ projects: data.projects || [], isLoading: false });
@@ -424,7 +425,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
 
   deleteProject: async (id) => {
     try {
-      const res = await fetch(`/api/projects/${encodeURIComponent(id)}`, {
+      const res = await fetch(apiUrl(`/api/projects/${encodeURIComponent(id)}`), {
         method: 'DELETE',
       });
       if (!res.ok) throw new Error('No se pudo eliminar el proyecto');
@@ -681,7 +682,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     set({ isLoading: true, errorMessage: null });
 
     try {
-      const res = await fetch('/api/media/probe', {
+      const res = await fetch(apiUrl('/api/media/probe'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ paths: filePaths }),
@@ -743,7 +744,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
             reader.readAsDataURL(file);
           });
 
-          const res = await fetch('/api/media/import-buffer', {
+          const res = await fetch(apiUrl('/api/media/import-buffer'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ fileName: file.name, base64Data }),
@@ -1545,7 +1546,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     set({ isLoading: true, errorMessage: null });
 
     try {
-      const res = await fetch('/api/media/generate-sample', {
+      const res = await fetch(apiUrl('/api/media/generate-sample'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ kind }),
@@ -1585,7 +1586,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
 
   clearEphemeralCache: async () => {
     try {
-      await fetch('/api/system/clear-cache', { method: 'POST' });
+      await fetch(apiUrl('/api/system/clear-cache'), { method: 'POST' });
       await get().fetchSystemStatus();
     } catch (err: any) {
       set({ errorMessage: err?.message || 'No se pudo limpiar la caché temporal' });

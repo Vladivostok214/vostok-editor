@@ -38,7 +38,7 @@ const ALL_SUPPORTED_EXTS = new Set([
   ...SUPPORTED_IMAGE_EXTS,
 ]);
 
-function ensureDirectories() {
+export function ensureDirectories() {
   fs.mkdirSync(PROJECTS_DIR, { recursive: true });
   fs.mkdirSync(EXPORTS_DIR, { recursive: true });
   fs.mkdirSync(TEMP_CACHE_DIR, { recursive: true });
@@ -261,22 +261,33 @@ function getCommonShortcuts() {
   });
 }
 
-export function mediaBackendPlugin(): Plugin {
-  ensureDirectories();
+export async function handleMediaBackendRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  next?: () => void
+): Promise<void> {
+  if (!req.url?.startsWith('/api/')) {
+    if (next) return next();
+    res.statusCode = 404;
+    res.end();
+    return;
+  }
 
-  return {
-    name: 'linux-video-editor-backend',
-    configureServer(server: ViteDevServer) {
-      server.middlewares.use(async (req, res, next) => {
-        if (!req.url?.startsWith('/api/')) {
-          return next();
-        }
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', '*');
 
-        const parsedUrl = new URL(req.url, 'http://localhost');
-        const pathname = parsedUrl.pathname;
+  if (req.method === 'OPTIONS') {
+    res.statusCode = 204;
+    res.end();
+    return;
+  }
 
-        try {
-          // 1. System & Cache Status
+  const parsedUrl = new URL(req.url, 'http://localhost');
+  const pathname = parsedUrl.pathname;
+
+  try {
+    // 1. System & Cache Status
           if (pathname === '/api/system/status' && req.method === 'GET') {
             ensureDirectories();
             const ffStatus = await getFfmpegVersion();
@@ -608,7 +619,8 @@ export function mediaBackendPlugin(): Plugin {
 
             if (!filePath || !fs.existsSync(filePath)) {
               res.statusCode = 404;
-              return res.end('Source video not found');
+              res.end('Source video not found');
+              return;
             }
 
             res.writeHead(200, {
@@ -1104,7 +1116,8 @@ export function mediaBackendPlugin(): Plugin {
             const isDownload = parsedUrl.searchParams.get('download') === '1';
             if (!filePath || !fs.existsSync(filePath)) {
               res.statusCode = 404;
-              return res.end('File not found');
+              res.end('File not found');
+              return;
             }
 
             const stat = fs.statSync(filePath);
@@ -1152,14 +1165,16 @@ export function mediaBackendPlugin(): Plugin {
                 'Content-Length': chunksize,
                 'Content-Type': contentType,
               });
-              return file.pipe(res);
+              file.pipe(res);
+              return;
             } else {
               res.writeHead(200, {
                 'Content-Length': stat.size,
                 'Content-Type': contentType,
                 'Accept-Ranges': 'bytes',
               });
-              return fs.createReadStream(filePath).pipe(res);
+              fs.createReadStream(filePath).pipe(res);
+              return;
             }
           }
 
@@ -1168,6 +1183,16 @@ export function mediaBackendPlugin(): Plugin {
           console.error('[MediaBackend Error]:', error);
           return sendJson(res, 500, { error: error?.message || 'Error interno en el servidor multimedia' });
         }
+}
+
+export function mediaBackendPlugin(): Plugin {
+  ensureDirectories();
+
+  return {
+    name: 'linux-video-editor-backend',
+    configureServer(server: ViteDevServer) {
+      server.middlewares.use((req, res, next) => {
+        handleMediaBackendRequest(req, res, next);
       });
     },
   };

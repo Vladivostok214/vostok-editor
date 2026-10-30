@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { apiUrl } from '../config/api';
 import {
   Folder,
   FolderPlus,
@@ -55,8 +56,8 @@ export const LocalFileBrowserModal: React.FC<LocalFileBrowserModalProps> = ({
     setError(null);
     try {
       const url = dirPath
-        ? `/api/fs/browse?dir=${encodeURIComponent(dirPath)}`
-        : '/api/fs/browse';
+        ? apiUrl(`/api/fs/browse?dir=${encodeURIComponent(dirPath)}`)
+        : apiUrl('/api/fs/browse');
       const res = await fetch(url);
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'No se pudo abrir la carpeta');
@@ -107,7 +108,7 @@ export const LocalFileBrowserModal: React.FC<LocalFileBrowserModalProps> = ({
     setCreatingLoading(true);
     setError(null);
     try {
-      const res = await fetch('/api/fs/mkdir', {
+      const res = await fetch(apiUrl('/api/fs/mkdir'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

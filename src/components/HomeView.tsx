@@ -103,14 +103,16 @@ export const HomeView: React.FC = () => {
     });
   };
 
-  // Convertir la rueda del ratón en desplazamiento horizontal continuo y suave
+  // Desplazamiento horizontal rápido, fluido y reactivo con la rueda del ratón
   const handleWheelScroll = (e: React.WheelEvent) => {
     if (!carouselRef.current) return;
-    const delta = Math.abs(e.deltaY) > Math.abs(e.deltaX) ? e.deltaY : e.deltaX;
-    carouselRef.current.scrollBy({
-      left: delta * 1.5,
-      behavior: 'auto',
-    });
+    const rawDelta = Math.abs(e.deltaY) > Math.abs(e.deltaX) ? e.deltaY : e.deltaX;
+    // En Linux deltaMode puede ser 1 (líneas) o 0 (píxeles)
+    const factor = e.deltaMode === 1 ? 40 : 1;
+    const normalized = rawDelta * factor;
+    // Escala dinámica para que un toque de rueda avance con agilidad
+    const move = Math.abs(normalized) < 25 ? normalized * 5 : normalized * 1.8;
+    carouselRef.current.scrollLeft += move;
   };
 
   return (
@@ -283,7 +285,7 @@ export const HomeView: React.FC = () => {
               <div
                 ref={carouselRef}
                 onWheel={handleWheelScroll}
-                className="h-full grid grid-rows-2 grid-flow-col auto-cols-[235px] lg:auto-cols-[250px] gap-3 overflow-x-auto overflow-y-hidden p-1.5 scroll-smooth scrollbar-none overscroll-none"
+                className="h-full grid grid-rows-2 grid-flow-col auto-cols-[235px] lg:auto-cols-[250px] gap-3 overflow-x-auto overflow-y-hidden p-1.5 scrollbar-none overscroll-none"
                 style={{ scrollbarWidth: 'none', msOverflowStyle: 'none' }}
               >
                 {projects.map((proj) => {
@@ -294,7 +296,7 @@ export const HomeView: React.FC = () => {
                     <div
                       key={proj.id}
                       onClick={() => openProject(proj)}
-                      className="group relative cursor-pointer rounded-2xl bg-[#16181f]/85 hover:bg-[#1c1e27] backdrop-blur-xl border border-white/[0.07] hover:border-[#00d4e5]/60 transition-all duration-300 shadow-[0_6px_22px_rgba(0,0,0,0.45)] hover:shadow-[0_10px_28px_rgba(0,212,229,0.14)] flex flex-col overflow-hidden h-[205px]"
+                      className="group relative cursor-pointer rounded-2xl bg-[#16181f] hover:bg-[#1c1e27] border border-white/[0.08] hover:border-[#00d4e5]/60 transition-all duration-200 shadow-[0_6px_22px_rgba(0,0,0,0.45)] hover:shadow-[0_10px_28px_rgba(0,212,229,0.14)] flex flex-col overflow-hidden h-[205px]"
                     >
                       {/* Miniatura Panorámica (Plano de Contraste Profundo) */}
                       <div className="relative w-full h-[155px] bg-[#0c0d10] overflow-hidden flex items-center justify-center">

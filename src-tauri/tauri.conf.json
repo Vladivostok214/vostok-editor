@@ -28,7 +28,10 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "category": "AudioVideo",
+    "category": "Video",
+    "resources": [
+      "../dist-server/*"
+    ],
     "shortDescription": "Editor de video vertical y horizontal no lineal",
     "longDescription": "Vostok Editor es una suite de edición de video rápida, moderna y profesional.",
     "icon": [

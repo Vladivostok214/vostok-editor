@@ -33,3 +33,4 @@ dist-ssr
 .cache
 .temp
 .tmp
+src-tauri/target

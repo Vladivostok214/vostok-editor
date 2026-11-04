@@ -500,7 +500,7 @@ export const TextInspector: React.FC<TextInspectorProps> = ({ clip }) => {
               updateClipTextConfig(clip.id, { fontFamily: originalFontRef.current });
             }
           }}
-          className="overflow-y-auto rounded-2xl bg-[#0f1015]/95 backdrop-blur-3xl border border-white/[0.12] shadow-[0_20px_50px_rgba(0,0,0,0.9)] p-1.5 space-y-0.5 scrollbar-thin scrollbar-thumb-white/20"
+          className="overflow-y-auto rounded-2xl bg-[#0f1015] border border-white/[0.12] shadow-[0_20px_50px_rgba(0,0,0,0.9)] p-1.5 space-y-0.5 scrollbar-thin scrollbar-thumb-white/20"
         >
           {VARIABLE_FONTS.map((font) => {
             const isCurrent =
@@ -550,7 +550,7 @@ export const TextInspector: React.FC<TextInspectorProps> = ({ clip }) => {
               updateClipTextConfig(clip.id, { fontSize: originalSizeRef.current });
             }
           }}
-          className="overflow-y-auto rounded-xl bg-[#0f1015]/95 backdrop-blur-3xl border border-white/[0.12] shadow-[0_20px_50px_rgba(0,0,0,0.9)] p-1 space-y-0.5 scrollbar-none"
+          className="overflow-y-auto rounded-xl bg-[#0f1015] border border-white/[0.12] shadow-[0_20px_50px_rgba(0,0,0,0.9)] p-1 space-y-0.5 scrollbar-none"
         >
           {[5, 6, 7, 8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 32].map((s) => (
             <div

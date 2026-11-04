@@ -10,7 +10,11 @@ import type {
   Track,
   TrackType,
   TransitionType,
+  AnimatableProperty,
+  InterpolationType,
+  Keyframe,
 } from '../types/project';
+import { insertOrUpdateKeyframe, removeKeyframeById } from '../lib/keyframeEngine';
 
 const MAX_HISTORY_STEPS = 50;
 
@@ -26,7 +30,9 @@ interface ProjectStore {
   isPlaying: boolean;
   timelineZoom: number; // pixels per second (default 65)
   selectedAssetId: string | null;
+  selectedAssetIds: string[];
   selectedClipId: string | null;
+  selectedClipIds: string[];
   clipboardClips: TimelineClip[];
 
   // UI Layout & Floating Panels State (Phase 5)
@@ -51,8 +57,14 @@ interface ProjectStore {
   deleteProject: (id: string) => Promise<void>;
 
   // Selection & Playhead
-  selectAsset: (assetId: string | null) => void;
-  selectClip: (clipId: string | null) => void;
+  selectAsset: (assetId: string | null, mode?: 'replace' | 'toggle' | 'add') => void;
+  setSelectedAssetIds: (ids: string[], primaryId?: string | null) => void;
+  selectAllAssets: (tab?: 'media' | 'audio' | 'all') => void;
+  clearAssetSelection: () => void;
+  selectClip: (clipId: string | null, mode?: 'replace' | 'toggle' | 'add') => void;
+  setSelectedClipIds: (ids: string[], primaryId?: string | null) => void;
+  selectAllClips: () => void;
+  clearClipSelection: () => void;
   setPlayheadTime: (time: number) => void;
   setIsPlaying: (playing: boolean) => void;
   togglePlay: () => void;
@@ -66,6 +78,12 @@ interface ProjectStore {
   setIsInspectorOpen: (val: boolean) => void;
   setIsFileBrowserOpen: (val: boolean) => void;
   toggleMainTrackMagnetic: () => Promise<void>;
+
+  // Arrastre de medios desde la biblioteca e indicador de destino en la línea de tiempo
+  assetDrag: AssetDragState | null;
+  dropIndicator: DropIndicator | null;
+  setAssetDrag: (drag: AssetDragState | null) => void;
+  setDropIndicator: (indicator: DropIndicator | null) => void;
 
   // Undo / Redo History
   undo: () => Promise<void>;
@@ -82,7 +100,9 @@ interface ProjectStore {
   updateInOutLive: (patch: { inPoint?: number | null; outPoint?: number | null }) => void;
   probeLocalFiles: (filePaths: string[]) => Promise<MediaAsset[]>;
   importDroppedFiles: (files: FileList | File[]) => Promise<MediaAsset[]>;
-  removeAssetFromLibrary: (assetId: string) => Promise<void>;
+  removeAssetFromLibrary: (assetId?: string) => Promise<void>;
+  removeSelectedAssetsFromLibrary: () => Promise<void>;
+  updateAssetWaveform: (assetId: string, waveform: number[]) => void;
 
   // Track Management
   addTrack: (type: TrackType) => Promise<Track | null>;
@@ -90,7 +110,14 @@ interface ProjectStore {
   removeTrack: (trackId: string) => Promise<void>;
 
   // Timeline Clip Operations
-  addAssetToTimeline: (assetId: string, options?: { trackId?: string; startTime?: number; createNewTrack?: boolean }) => Promise<void>;
+  addAssetToTimeline: (
+    assetId: string,
+    options?: { trackId?: string; startTime?: number; createNewTrack?: boolean; insertAtIndex?: number }
+  ) => Promise<void>;
+  addAssetsToTimeline: (
+    assetIds: string[],
+    options?: { trackId?: string; startTime?: number; createNewTrack?: boolean; insertAtIndex?: number }
+  ) => Promise<void>;
   addTextTemplateToProject: (
     templateName: string,
     config: TextConfig,
@@ -98,6 +125,13 @@ interface ProjectStore {
     initialTransform?: Partial<TimelineClip['transform']>
   ) => Promise<TimelineClip | null>;
   moveClipLive: (clipId: string, newStartTime: number, targetTrackId?: string) => void;
+  moveSelectedClipsLive: (
+    initialStarts: Record<string, number>,
+    deltaSeconds: number,
+    primaryClipId?: string,
+    targetTrackIdForPrimary?: string
+  ) => void;
+  moveClipToNewTrack: (clipId: string, newStartTime: number, insertIndex: number) => void;
   trimClipLive: (clipId: string, edge: 'left' | 'right', deltaSeconds: number) => void;
   splitClipAtPlayhead: (clipId?: string) => Promise<void>;
   duplicateClip: (clipId?: string) => Promise<void>;
@@ -113,7 +147,24 @@ interface ProjectStore {
   updateClipTransformLive: (clipId: string, transformPatch: Partial<TimelineClip['transform']>) => void;
   resetClipTransform: (clipId: string) => Promise<void>;
   updateClipTextConfig: (clipId: string, textPatch: Partial<TextConfig>) => Promise<void>;
-  removeClip: (clipId: string) => Promise<void>;
+  setClipKeyframe: (
+    clipId: string,
+    property: AnimatableProperty,
+    timeOffset: number,
+    value: number,
+    interpolation?: InterpolationType
+  ) => Promise<void>;
+  removeClipKeyframe: (
+    clipId: string,
+    property: AnimatableProperty,
+    keyframeId: string
+  ) => Promise<void>;
+  clearClipKeyframes: (
+    clipId: string,
+    property?: AnimatableProperty
+  ) => Promise<void>;
+  removeClip: (clipId?: string) => Promise<void>;
+  removeSelectedClips: () => Promise<void>;
 
   generateSampleMedia: (kind?: 'video' | 'audio' | 'image' | 'pack') => Promise<MediaAsset[]>;
   clearEphemeralCache: () => Promise<void>;
@@ -131,6 +182,38 @@ function cloneProject(proj: ProjectData): ProjectData {
 function sortTracksByPriority(tracks: Track[]): Track[] {
   const order: Record<TrackType, number> = { text: 0, video: 1, audio: 2 };
   return [...tracks].sort((a, b) => order[a.type] - order[b.type]);
+}
+
+const TRACK_TYPE_ORDER: Record<TrackType, number> = { text: 0, video: 1, audio: 2 };
+
+/**
+ * Rango de índices válidos (en el arreglo de pistas) donde se puede insertar una pista
+ * nueva del tipo dado sin romper la jerarquía texto > video > audio.
+ */
+export function getTrackZoneBounds(tracks: Track[], type: TrackType): { lo: number; hi: number } {
+  const lo = tracks.filter((t) => TRACK_TYPE_ORDER[t.type] < TRACK_TYPE_ORDER[type]).length;
+  const count = tracks.filter((t) => t.type === type).length;
+  return { lo, hi: lo + count };
+}
+
+/** Crea una pista nueva con numeración secuencial limpia para su tipo. */
+function buildNewTrack(tracks: Track[], type: TrackType): Track {
+  const existingNums = tracks
+    .filter((t) => t.type === type)
+    .map((t) => {
+      const match = t.name.match(/\d+$/);
+      return match ? parseInt(match[0], 10) : 0;
+    });
+  const nextNum = existingNums.length > 0 ? Math.max(...existingNums) + 1 : 1;
+  const label = type === 'video' ? 'Video' : type === 'audio' ? 'Audio' : 'Texto';
+  return {
+    id: createId(`track_${type}`),
+    name: `Pista ${label} ${nextNum}`,
+    type,
+    muted: false,
+    locked: false,
+    hidden: false,
+  };
 }
 
 export function getMainVideoTrack(tracks: Track[]): Track | undefined {
@@ -295,6 +378,19 @@ async function persistProjectToDisk(project: ProjectData): Promise<ProjectData> 
   return data.project || project;
 }
 
+export interface DropIndicator {
+  kind: 'track' | 'new-track';
+  /** Rectángulo en coordenadas de ventana (position: fixed) */
+  rect: { left: number; top: number; width: number; height: number };
+}
+
+export interface AssetDragState {
+  assetId: string;
+  assetIds?: string[];
+  clientX: number;
+  clientY: number;
+}
+
 export const useProjectStore = create<ProjectStore>((set, get) => ({
   view: 'home',
   projects: [],
@@ -306,7 +402,9 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   isPlaying: false,
   timelineZoom: 65,
   selectedAssetId: null,
+  selectedAssetIds: [],
   selectedClipId: null,
+  selectedClipIds: [],
   clipboardClips: [],
 
   isFullscreenPreview: false,
@@ -315,6 +413,26 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   isInspectorOpen: false,
   isFileBrowserOpen: false,
   isMainTrackMagnetic: true,
+
+  assetDrag: null,
+  dropIndicator: null,
+  setAssetDrag: (drag) => set({ assetDrag: drag }),
+  setDropIndicator: (indicator) => {
+    const prev = get().dropIndicator;
+    if (prev === indicator) return;
+    if (
+      prev &&
+      indicator &&
+      prev.kind === indicator.kind &&
+      prev.rect.left === indicator.rect.left &&
+      prev.rect.top === indicator.rect.top &&
+      prev.rect.width === indicator.rect.width &&
+      prev.rect.height === indicator.rect.height
+    ) {
+      return;
+    }
+    set({ dropIndicator: indicator });
+  },
 
   systemStatus: null,
   isLoading: false,
@@ -370,7 +488,9 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         playheadTime: 0,
         isPlaying: false,
         selectedAssetId: null,
+        selectedAssetIds: [],
         selectedClipId: null,
+        selectedClipIds: [],
         isFullscreenPreview: false,
         isTimelineCollapsed: false,
         isLeftDrawerOpen: false,
@@ -400,7 +520,9 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       playheadTime: 0,
       isPlaying: false,
       selectedAssetId: null,
+      selectedAssetIds: [],
       selectedClipId: null,
+      selectedClipIds: [],
       isFullscreenPreview: false,
       isTimelineCollapsed: false,
       isLeftDrawerOpen: normalizedProject.assets.length > 0,
@@ -439,15 +561,210 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     }
   },
 
-  selectAsset: (assetId) => {
-    set({ selectedAssetId: assetId, selectedClipId: null, isInspectorOpen: false });
+  selectAsset: (assetId, mode = 'replace') => {
+    if (!assetId) {
+      set({
+        selectedAssetId: null,
+        selectedAssetIds: [],
+      });
+      return;
+    }
+
+    if (mode === 'toggle') {
+      const current = get().selectedAssetIds;
+      if (current.includes(assetId)) {
+        const next = current.filter((id) => id !== assetId);
+        set({
+          selectedAssetIds: next,
+          selectedAssetId: next.length > 0 ? next[next.length - 1] : null,
+          selectedClipId: null,
+          selectedClipIds: [],
+          isInspectorOpen: false,
+        });
+      } else {
+        const next = [...current, assetId];
+        set({
+          selectedAssetIds: next,
+          selectedAssetId: assetId,
+          selectedClipId: null,
+          selectedClipIds: [],
+          isInspectorOpen: false,
+        });
+      }
+      return;
+    }
+
+    if (mode === 'add') {
+      const current = get().selectedAssetIds;
+      if (!current.includes(assetId)) {
+        set({
+          selectedAssetIds: [...current, assetId],
+          selectedAssetId: assetId,
+          selectedClipId: null,
+          selectedClipIds: [],
+          isInspectorOpen: false,
+        });
+      }
+      return;
+    }
+
+    // Default 'replace' mode
+    set({
+      selectedAssetId: assetId,
+      selectedAssetIds: [assetId],
+      selectedClipId: null,
+      selectedClipIds: [],
+      isInspectorOpen: false,
+    });
   },
 
-  selectClip: (clipId) => {
+  setSelectedAssetIds: (ids, primaryId) => {
+    if (ids.length === 0) {
+      set({
+        selectedAssetIds: [],
+        selectedAssetId: null,
+      });
+      return;
+    }
+
+    const effectivePrimary =
+      primaryId && ids.includes(primaryId)
+        ? primaryId
+        : ids[ids.length - 1];
+
+    set({
+      selectedAssetIds: ids,
+      selectedAssetId: effectivePrimary,
+      selectedClipId: null,
+      selectedClipIds: [],
+      isInspectorOpen: false,
+    });
+  },
+
+  selectAllAssets: (tab = 'all') => {
+    const proj = get().currentProject;
+    if (!proj || proj.assets.length === 0) return;
+    const filtered = proj.assets.filter((a) => {
+      if (tab === 'audio') return a.type === 'audio';
+      if (tab === 'media') return a.type !== 'audio';
+      return true;
+    });
+    const ids = filtered.map((a) => a.id);
+    set({
+      selectedAssetIds: ids,
+      selectedAssetId: ids[0] || null,
+      selectedClipId: null,
+      selectedClipIds: [],
+      isInspectorOpen: false,
+    });
+  },
+
+  clearAssetSelection: () => {
+    set({
+      selectedAssetId: null,
+      selectedAssetIds: [],
+    });
+  },
+
+  selectClip: (clipId, mode = 'replace') => {
+    if (!clipId) {
+      set({
+        selectedClipId: null,
+        selectedClipIds: [],
+        isInspectorOpen: false,
+      });
+      return;
+    }
+
+    if (mode === 'toggle') {
+      const current = get().selectedClipIds;
+      if (current.includes(clipId)) {
+        const next = current.filter((id) => id !== clipId);
+        set({
+          selectedClipIds: next,
+          selectedClipId: next.length > 0 ? next[next.length - 1] : null,
+          isInspectorOpen: next.length > 0,
+        });
+      } else {
+        const next = [...current, clipId];
+        set({
+          selectedClipIds: next,
+          selectedClipId: clipId,
+          selectedAssetId: null,
+          selectedAssetIds: [],
+          isInspectorOpen: true,
+        });
+      }
+      return;
+    }
+
+    if (mode === 'add') {
+      const current = get().selectedClipIds;
+      if (!current.includes(clipId)) {
+        const next = [...current, clipId];
+        set({
+          selectedClipIds: next,
+          selectedClipId: clipId,
+          selectedAssetId: null,
+          selectedAssetIds: [],
+          isInspectorOpen: true,
+        });
+      }
+      return;
+    }
+
+    // Default 'replace' mode
     set({
       selectedClipId: clipId,
+      selectedClipIds: [clipId],
       selectedAssetId: null,
-      isInspectorOpen: clipId ? true : false,
+      selectedAssetIds: [],
+      isInspectorOpen: true,
+    });
+  },
+
+  setSelectedClipIds: (ids, primaryId) => {
+    if (ids.length === 0) {
+      set({
+        selectedClipIds: [],
+        selectedClipId: null,
+        isInspectorOpen: false,
+      });
+      return;
+    }
+
+    const effectivePrimary =
+      primaryId && ids.includes(primaryId)
+        ? primaryId
+        : ids[ids.length - 1];
+
+    set({
+      selectedClipIds: ids,
+      selectedClipId: effectivePrimary,
+      selectedAssetId: null,
+      selectedAssetIds: [],
+      isInspectorOpen: true,
+    });
+  },
+
+  selectAllClips: () => {
+    const current = get().currentProject;
+    if (!current || current.clips.length === 0) return;
+    const allIds = current.clips.map((c) => c.id);
+    set({
+      selectedClipIds: allIds,
+      selectedClipId: allIds[0] || null,
+      selectedAssetId: null,
+      selectedAssetIds: [],
+      isInspectorOpen: true,
+    });
+  },
+
+  clearClipSelection: () => {
+    set({
+      selectedClipIds: [],
+      selectedClipId: null,
+      isInspectorOpen: false,
     });
   },
 
@@ -707,7 +1024,9 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       if (newAssets[0]) {
         set({
           selectedAssetId: newAssets[0].id,
+          selectedAssetIds: newAssets.map((a) => a.id),
           selectedClipId: null,
+          selectedClipIds: [],
           isLeftDrawerOpen: true,
         });
       }
@@ -770,7 +1089,9 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         });
         set({
           selectedAssetId: imported[0].id,
+          selectedAssetIds: imported.map((a) => a.id),
           selectedClipId: null,
+          selectedClipIds: [],
           isLeftDrawerOpen: true,
         });
       }
@@ -786,19 +1107,58 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
 
   removeAssetFromLibrary: async (assetId) => {
     const isMagnetic = get().isMainTrackMagnetic;
+    const selectedIds = get().selectedAssetIds;
+
+    let targetIds: string[];
+    if (assetId) {
+      if (selectedIds.includes(assetId) && selectedIds.length > 1) {
+        targetIds = selectedIds;
+      } else {
+        targetIds = [assetId];
+      }
+    } else {
+      targetIds = selectedIds.length > 0 ? selectedIds : (get().selectedAssetId ? [get().selectedAssetId!] : []);
+    }
+
+    if (targetIds.length === 0) return;
+    const targetSet = new Set(targetIds);
+
     await get().commitProjectUpdate((proj) => {
-      const remainingClips = proj.clips.filter((c) => c.assetId !== assetId);
+      const remainingClips = proj.clips.filter((c) => !c.assetId || !targetSet.has(c.assetId));
       const remainingTracks = pruneEmptyTracks(proj.tracks, remainingClips);
       return {
         ...proj,
-        assets: proj.assets.filter((a) => a.id !== assetId),
+        assets: proj.assets.filter((a) => !targetSet.has(a.id)),
         clips: packMainTrackClips(remainingTracks, remainingClips, isMagnetic),
         tracks: remainingTracks,
       };
     });
-    if (get().selectedAssetId === assetId) {
-      set({ selectedAssetId: null });
-    }
+
+    const currentSelected = get().selectedAssetIds.filter((id) => !targetSet.has(id));
+    const currentPrimary =
+      get().selectedAssetId && targetSet.has(get().selectedAssetId!)
+        ? currentSelected[currentSelected.length - 1] || null
+        : get().selectedAssetId;
+
+    set({
+      selectedAssetIds: currentSelected,
+      selectedAssetId: currentPrimary,
+    });
+  },
+
+  removeSelectedAssetsFromLibrary: async () => {
+    await get().removeAssetFromLibrary();
+  },
+
+  updateAssetWaveform: (assetId, waveform) => {
+    const proj = get().currentProject;
+    if (!proj) return;
+    set({
+      currentProject: {
+        ...proj,
+        assets: proj.assets.map((a) => (a.id === assetId ? { ...a, waveform } : a)),
+      },
+    });
   },
 
   addTrack: async (type) => {
@@ -836,6 +1196,12 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   },
 
   addAssetToTimeline: async (assetId, options) => {
+    const selectedAssetIds = get().selectedAssetIds;
+    if (selectedAssetIds.includes(assetId) && selectedAssetIds.length > 1) {
+      await get().addAssetsToTimeline(selectedAssetIds, options);
+      return;
+    }
+
     const current = get().currentProject;
     if (!current) return;
     const asset = current.assets.find((a) => a.id === assetId);
@@ -861,24 +1227,14 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       }
 
       let targetTrack: Track;
-      if (options?.createNewTrack) {
-        const existingNums = tracks
-          .filter((t) => t.type === desiredTrackType)
-          .map((t) => {
-            const match = t.name.match(/\d+$/);
-            return match ? parseInt(match[0], 10) : 0;
-          });
-        const nextNum = existingNums.length > 0 ? Math.max(...existingNums) + 1 : 1;
-        const label = desiredTrackType === 'video' ? 'Video' : 'Audio';
-        targetTrack = {
-          id: createId(`track_${desiredTrackType}`),
-          name: `Pista ${label} ${nextNum}`,
-          type: desiredTrackType,
-          muted: false,
-          locked: false,
-          hidden: false,
-        };
-        if (desiredTrackType === 'video') {
+      if (options?.createNewTrack || typeof options?.insertAtIndex === 'number') {
+        targetTrack = buildNewTrack(tracks, desiredTrackType);
+        if (typeof options?.insertAtIndex === 'number') {
+          // Inserción en una posición exacta (entre dos pistas), respetando la zona del tipo
+          const bounds = getTrackZoneBounds(tracks, desiredTrackType);
+          const at = Math.max(bounds.lo, Math.min(bounds.hi, options.insertAtIndex));
+          tracks.splice(at, 0, targetTrack);
+        } else if (desiredTrackType === 'video') {
           const firstVideoIdx = tracks.findIndex((t) => t.type === 'video');
           if (firstVideoIdx !== -1) {
             tracks.splice(firstVideoIdx, 0, targetTrack);
@@ -914,7 +1270,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         startTime,
         duration,
         sourceStart: 0,
-        maxDuration: asset.duration,
+        maxDuration: asset.type === 'image' ? undefined : asset.duration,
         linkGroupId,
         transform: { x: 0, y: 0, scale: 1, rotation: 0, opacity: 1, flipX: false },
         volume: 1,
@@ -972,7 +1328,166 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     if (createdMainClipId) {
       set({
         selectedClipId: createdMainClipId,
+        selectedClipIds: [createdMainClipId],
         selectedAssetId: null,
+        selectedAssetIds: [],
+        isInspectorOpen: true,
+      });
+    }
+  },
+
+  addAssetsToTimeline: async (assetIds, options) => {
+    const current = get().currentProject;
+    if (!current || assetIds.length === 0) return;
+
+    const assetsToInsert = assetIds
+      .map((id) => current.assets.find((a) => a.id === id))
+      .filter((a): a is MediaAsset => Boolean(a));
+
+    if (assetsToInsert.length === 0) return;
+
+    if (assetsToInsert.length === 1) {
+      await get().addAssetToTimeline(assetsToInsert[0].id, options);
+      return;
+    }
+
+    const isMagnetic = get().isMainTrackMagnetic;
+    const createdMainClipIds: string[] = [];
+
+    await get().commitProjectUpdate((proj) => {
+      let tracks: Track[] = [...proj.tracks];
+      let currentClips: TimelineClip[] = [...proj.clips];
+
+      let baseStartTime =
+        typeof options?.startTime === 'number'
+          ? Math.max(0, Number(options.startTime.toFixed(2)))
+          : Number(get().playheadTime.toFixed(2));
+
+      if (proj.clips.length === 0 && options?.startTime === undefined) {
+        baseStartTime = 0;
+      }
+
+      let currentTime = baseStartTime;
+      let sharedNewTrack: Track | null = null;
+
+      if (options?.createNewTrack || typeof options?.insertAtIndex === 'number') {
+        const firstDesiredType: TrackType =
+          assetsToInsert[0].type === 'image' ? 'video' : assetsToInsert[0].type;
+        sharedNewTrack = buildNewTrack(tracks, firstDesiredType);
+        if (typeof options?.insertAtIndex === 'number') {
+          const bounds = getTrackZoneBounds(tracks, firstDesiredType);
+          const at = Math.max(bounds.lo, Math.min(bounds.hi, options.insertAtIndex));
+          tracks.splice(at, 0, sharedNewTrack);
+        } else if (firstDesiredType === 'video') {
+          const firstVideoIdx = tracks.findIndex((t) => t.type === 'video');
+          if (firstVideoIdx !== -1) {
+            tracks.splice(firstVideoIdx, 0, sharedNewTrack);
+          } else {
+            tracks.push(sharedNewTrack);
+          }
+        } else {
+          tracks.push(sharedNewTrack);
+        }
+        tracks = sortTracksByPriority(tracks);
+      }
+
+      for (const asset of assetsToInsert) {
+        const desiredTrackType: TrackType = asset.type === 'image' ? 'video' : asset.type;
+        const duration = asset.duration || 4;
+        let targetTrack: Track;
+
+        if (
+          sharedNewTrack &&
+          (sharedNewTrack.type === desiredTrackType ||
+            (sharedNewTrack.type === 'video' && asset.type === 'image'))
+        ) {
+          targetTrack = sharedNewTrack;
+        } else {
+          const res = findOrCreateAvailableTrack(
+            tracks,
+            currentClips,
+            desiredTrackType,
+            currentTime,
+            duration,
+            options?.trackId
+          );
+          targetTrack = res.track;
+          tracks = res.updatedTracks;
+        }
+
+        const linkGroupId =
+          asset.type === 'video' && asset.hasAudio ? createId('link') : undefined;
+
+        const mainClip: TimelineClip = {
+          id: createId('clip'),
+          assetId: asset.id,
+          trackId: targetTrack.id,
+          type: asset.type,
+          name: asset.name,
+          startTime: currentTime,
+          duration,
+          sourceStart: 0,
+          maxDuration: asset.type === 'image' ? undefined : asset.duration,
+          linkGroupId,
+          transform: { x: 0, y: 0, scale: 1, rotation: 0, opacity: 1, flipX: false },
+          volume: 1,
+          muted: false,
+          fadeIn: 0,
+          fadeOut: 0,
+          overlapTransition: 'crossfade',
+        };
+        createdMainClipIds.push(mainClip.id);
+        currentClips.push(mainClip);
+
+        if (asset.type === 'video' && asset.hasAudio && linkGroupId) {
+          const audioRes = findOrCreateAvailableTrack(
+            tracks,
+            currentClips,
+            'audio',
+            currentTime,
+            duration
+          );
+          const audioTrack = audioRes.track;
+          tracks = audioRes.updatedTracks;
+
+          const linkedAudioClip: TimelineClip = {
+            id: createId('clip_aud'),
+            assetId: asset.id,
+            trackId: audioTrack.id,
+            type: 'audio',
+            name: `${asset.name} (Audio)`,
+            startTime: currentTime,
+            duration,
+            sourceStart: 0,
+            maxDuration: asset.duration,
+            linkGroupId,
+            transform: { x: 0, y: 0, scale: 1, rotation: 0, opacity: 1, flipX: false },
+            volume: 1,
+            muted: false,
+            fadeIn: 0,
+            fadeOut: 0,
+            overlapTransition: 'crossfade',
+          };
+          currentClips.push(linkedAudioClip);
+        }
+
+        currentTime = Number((currentTime + duration).toFixed(2));
+      }
+
+      const finalTracks = sortTracksByPriority(tracks);
+      return {
+        ...proj,
+        tracks: finalTracks,
+        clips: packMainTrackClips(finalTracks, currentClips, isMagnetic),
+      };
+    });
+
+    if (createdMainClipIds.length > 0) {
+      set({
+        selectedClipId: createdMainClipIds[0],
+        selectedClipIds: createdMainClipIds,
+        selectedAssetId: null,
+        selectedAssetIds: [],
         isInspectorOpen: true,
       });
     }
@@ -1029,7 +1544,9 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     if (createdClip) {
       set({
         selectedClipId: (createdClip as TimelineClip).id,
+        selectedClipIds: [(createdClip as TimelineClip).id],
         selectedAssetId: null,
+        selectedAssetIds: [],
         isInspectorOpen: true,
       });
     }
@@ -1089,6 +1606,100 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     });
   },
 
+  moveSelectedClipsLive: (
+    initialStarts,
+    deltaSeconds,
+    primaryClipId,
+    targetTrackIdForPrimary
+  ) => {
+    const current = get().currentProject;
+    if (!current) return;
+
+    const startValues = Object.values(initialStarts);
+    const minStart = startValues.length > 0 ? Math.min(...startValues) : 0;
+    const safeDelta = Number(Math.max(-minStart, deltaSeconds).toFixed(2));
+
+    const updatedClips = current.clips.map((c) => {
+      const baseStart = initialStarts[c.id];
+      if (baseStart === undefined) return c;
+
+      let nextTrackId = c.trackId;
+      if (primaryClipId && c.id === primaryClipId && targetTrackIdForPrimary) {
+        const destTrack = current.tracks.find((t) => t.id === targetTrackIdForPrimary);
+        const expectedTrackType: TrackType =
+          c.type === 'image' ? 'video' : c.type === 'text' ? 'text' : c.type;
+        if (destTrack && destTrack.type === expectedTrackType && !destTrack.locked) {
+          nextTrackId = destTrack.id;
+        }
+      }
+
+      return {
+        ...c,
+        trackId: nextTrackId,
+        startTime: Math.max(0, Number((baseStart + safeDelta).toFixed(2))),
+      };
+    });
+
+    const finalClips = packMainTrackClips(
+      current.tracks,
+      updatedClips,
+      get().isMainTrackMagnetic
+    );
+
+    set({
+      currentProject: {
+        ...current,
+        clips: finalClips,
+      },
+    });
+  },
+
+  moveClipToNewTrack: (clipId, newStartTime, insertIndex) => {
+    const current = get().currentProject;
+    if (!current) return;
+    const targetClip = current.clips.find((c) => c.id === clipId);
+    if (!targetClip) return;
+
+    const currentTrack = current.tracks.find((t) => t.id === targetClip.trackId);
+    if (currentTrack?.locked) return;
+
+    const trackType: TrackType =
+      targetClip.type === 'image' ? 'video' : targetClip.type === 'text' ? 'text' : targetClip.type;
+
+    const newTrack = buildNewTrack(current.tracks, trackType);
+    const bounds = getTrackZoneBounds(current.tracks, trackType);
+    const at = Math.max(bounds.lo, Math.min(bounds.hi, insertIndex));
+    const withNew = [...current.tracks];
+    withNew.splice(at, 0, newTrack);
+    const sortedTracks = sortTracksByPriority(withNew);
+
+    const clampedStart = Math.max(0, Number(newStartTime.toFixed(2)));
+    const delta = clampedStart - targetClip.startTime;
+    const groupId = targetClip.linkGroupId;
+
+    const movedClips = current.clips.map((c) => {
+      if (c.id === clipId) {
+        return { ...c, trackId: newTrack.id, startTime: clampedStart };
+      }
+      if (groupId && c.linkGroupId === groupId) {
+        return { ...c, startTime: Math.max(0, Number((c.startTime + delta).toFixed(2))) };
+      }
+      return c;
+    });
+
+    // La pista de origen puede haber quedado vacía: se elimina igual que al borrar clips
+    const finalTracks = pruneEmptyTracks(sortedTracks, movedClips);
+    const finalClips = packMainTrackClips(finalTracks, movedClips, get().isMainTrackMagnetic);
+
+    set({
+      currentProject: {
+        ...current,
+        tracks: finalTracks,
+        clips: finalClips,
+      },
+    });
+  },
+
   trimClipLive: (clipId, edge, deltaSeconds) => {
     const current = get().currentProject;
     if (!current) return;
@@ -1110,17 +1721,24 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
             (c) => c.linkGroupId === groupId && c.trackId === mainVideoTrack.id
           )));
 
+    const isStaticMedia = targetClip.type === 'image' || targetClip.type === 'text';
+    const effectiveMaxDuration = isStaticMedia ? undefined : targetClip.maxDuration;
+
     let newStartTime = targetClip.startTime;
     let newDuration = targetClip.duration;
     let newSourceStart = targetClip.sourceStart;
 
     if (edge === 'left') {
       const maxLeftMove = targetClip.duration - minDuration;
-      const minLeftMove = targetClip.maxDuration
+      // Para medios con duración finita (video/audio), no se puede retroceder antes del inicio del archivo original (sourceStart = 0).
+      // Para medios estáticos (imagen/texto), no existe sourceStart: se puede expandir hacia la izquierda
+      // hasta llegar al inicio del timeline (startTime = 0), a menos que esté en pista magnética.
+      const minLeftMove = effectiveMaxDuration
         ? -targetClip.sourceStart
         : isOnMagneticMain
         ? 0
         : -targetClip.startTime;
+
       const clampedDelta = Math.max(
         isOnMagneticMain ? minLeftMove : Math.max(-targetClip.startTime, minLeftMove),
         Math.min(maxLeftMove, deltaSeconds)
@@ -1129,11 +1747,14 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         ? targetClip.startTime
         : Number((targetClip.startTime + clampedDelta).toFixed(2));
       newDuration = Number((targetClip.duration - clampedDelta).toFixed(2));
-      newSourceStart = Math.max(0, Number((targetClip.sourceStart + clampedDelta).toFixed(2)));
+      newSourceStart = isStaticMedia
+        ? 0
+        : Math.max(0, Number((targetClip.sourceStart + clampedDelta).toFixed(2)));
     } else {
-      const maxAllowedDuration = targetClip.maxDuration
-        ? Math.max(minDuration, targetClip.maxDuration - targetClip.sourceStart)
-        : 120;
+      // Para medios estáticos o sin maxDuration, se permite alargar libremente hasta 86400s (24 horas)
+      const maxAllowedDuration = effectiveMaxDuration
+        ? Math.max(minDuration, effectiveMaxDuration - targetClip.sourceStart)
+        : 86400;
       newDuration = Math.max(
         minDuration,
         Math.min(maxAllowedDuration, Number((targetClip.duration + deltaSeconds).toFixed(2)))
@@ -1227,7 +1848,10 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
           id: createId(clip.type === 'audio' ? 'clip_aud' : 'clip'),
           startTime: Number(playheadTime.toFixed(2)),
           duration: Number((clip.duration - localOffset).toFixed(2)),
-          sourceStart: Number((clip.sourceStart + localOffset).toFixed(2)),
+          sourceStart:
+            clip.type === 'image' || clip.type === 'text'
+              ? 0
+              : Number((clip.sourceStart + localOffset).toFixed(2)),
           linkGroupId: newRightGroupId,
           fadeIn: 0,
         };
@@ -1251,32 +1875,57 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   },
 
   duplicateClip: async (explicitClipId) => {
-    const { currentProject, selectedClipId, isMainTrackMagnetic } = get();
-    const targetId = explicitClipId || selectedClipId;
-    if (!currentProject || !targetId) return;
+    const { currentProject, selectedClipIds, selectedClipId, isMainTrackMagnetic } = get();
+    if (!currentProject) return;
 
-    const target = currentProject.clips.find((c) => c.id === targetId);
-    if (!target) return;
+    const targetIds = new Set<string>();
+    if (explicitClipId) {
+      targetIds.add(explicitClipId);
+    } else if (selectedClipIds.length > 0) {
+      selectedClipIds.forEach((id) => targetIds.add(id));
+    } else if (selectedClipId) {
+      targetIds.add(selectedClipId);
+    }
+    if (targetIds.size === 0) return;
 
-    const groupId = target.linkGroupId;
-    const sourceClips = currentProject.clips.filter((c) =>
-      groupId ? c.linkGroupId === groupId : c.id === targetId
+    // Include linked group peers
+    const linkGroups = new Set<string>();
+    currentProject.clips.forEach((c) => {
+      if (targetIds.has(c.id) && c.linkGroupId) {
+        linkGroups.add(c.linkGroupId);
+      }
+    });
+
+    const sourceClips = currentProject.clips.filter(
+      (c) => targetIds.has(c.id) || (c.linkGroupId && linkGroups.has(c.linkGroupId))
     );
     if (sourceClips.length === 0) return;
 
-    const newGroupId = sourceClips.length > 1 ? createId('link') : undefined;
-    let duplicatedMainId: string | null = null;
+    const maxEnd = Math.max(...sourceClips.map((c) => c.startTime + c.duration));
+    const minStart = Math.min(...sourceClips.map((c) => c.startTime));
+    const span = Math.max(0.1, maxEnd - minStart);
+    const createdIds: string[] = [];
+    let firstDuplicatedId: string | null = null;
+
+    // Map old linkGroupId to new linkGroupId
+    const groupMap = new Map<string, string>();
+    sourceClips.forEach((c) => {
+      if (c.linkGroupId && !groupMap.has(c.linkGroupId)) {
+        groupMap.set(c.linkGroupId, createId('link'));
+      }
+    });
 
     await get().commitProjectUpdate((proj) => {
-      const shift = target.duration - 0.01;
       const clones: TimelineClip[] = sourceClips.map((c) => {
         const newId = createId(c.type === 'audio' ? 'clip_aud' : 'clip');
-        if (c.id === target.id) duplicatedMainId = newId;
+        createdIds.push(newId);
+        if (!firstDuplicatedId) firstDuplicatedId = newId;
+        const newLinkGroupId = c.linkGroupId ? groupMap.get(c.linkGroupId) : undefined;
         return {
           ...JSON.parse(JSON.stringify(c)),
           id: newId,
-          startTime: Number((c.startTime + shift).toFixed(2)),
-          linkGroupId: newGroupId,
+          startTime: Number((c.startTime + span).toFixed(2)),
+          linkGroupId: newLinkGroupId,
         };
       });
 
@@ -1287,8 +1936,14 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       };
     });
 
-    if (duplicatedMainId) {
-      set({ selectedClipId: duplicatedMainId, selectedAssetId: null, isInspectorOpen: true });
+    if (createdIds.length > 0) {
+      set({
+        selectedClipIds: createdIds,
+        selectedClipId: firstDuplicatedId,
+        selectedAssetId: null,
+        selectedAssetIds: [],
+        isInspectorOpen: true,
+      });
     }
   },
 
@@ -1335,25 +1990,39 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   },
 
   copySelectedClip: (explicitClipId) => {
-    const { currentProject, selectedClipId } = get();
-    const targetId = explicitClipId || selectedClipId;
-    if (!currentProject || !targetId) return;
-    const target = currentProject.clips.find((c) => c.id === targetId);
-    if (!target) return;
+    const { currentProject, selectedClipIds, selectedClipId } = get();
+    if (!currentProject) return;
 
-    const groupId = target.linkGroupId;
+    const targetIds = new Set<string>();
+    if (explicitClipId) {
+      targetIds.add(explicitClipId);
+    } else if (selectedClipIds.length > 0) {
+      selectedClipIds.forEach((id) => targetIds.add(id));
+    } else if (selectedClipId) {
+      targetIds.add(selectedClipId);
+    }
+    if (targetIds.size === 0) return;
+
+    const linkGroups = new Set<string>();
+    currentProject.clips.forEach((c) => {
+      if (targetIds.has(c.id) && c.linkGroupId) {
+        linkGroups.add(c.linkGroupId);
+      }
+    });
+
     const toCopy = currentProject.clips
-      .filter((c) => (groupId ? c.linkGroupId === groupId : c.id === targetId))
+      .filter((c) => targetIds.has(c.id) || (c.linkGroupId && linkGroups.has(c.linkGroupId)))
       .map((c) => JSON.parse(JSON.stringify(c)));
 
     set({ clipboardClips: toCopy });
   },
 
   cutSelectedClip: async (explicitClipId) => {
-    const targetId = explicitClipId || get().selectedClipId;
-    if (!targetId) return;
-    get().copySelectedClip(targetId);
-    await get().removeClip(targetId);
+    const { selectedClipIds, selectedClipId } = get();
+    const targetId = explicitClipId || selectedClipId;
+    if (!targetId && selectedClipIds.length === 0) return;
+    get().copySelectedClip(explicitClipId);
+    await get().removeClip(explicitClipId);
   },
 
   pasteClipboardAtPlayhead: async () => {
@@ -1361,15 +2030,15 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     if (!currentProject || clipboardClips.length === 0) return;
 
     const newGroupId = clipboardClips.length > 1 ? createId('link') : undefined;
-    let firstCreatedId: string | null = null;
+    const pastedCreatedIds: string[] = [];
 
     await get().commitProjectUpdate((proj) => {
       const tracks = [...proj.tracks];
       const minStart = Math.min(...clipboardClips.map((c) => c.startTime));
-      const pasted: TimelineClip[] = clipboardClips.map((c, index) => {
+      const pasted: TimelineClip[] = clipboardClips.map((c) => {
         const offset = c.startTime - minStart;
         const newId = createId('clip');
-        if (index === 0) firstCreatedId = newId;
+        pastedCreatedIds.push(newId);
 
         let destTrack = tracks.find((t) => t.id === c.trackId);
         if (!destTrack) {
@@ -1407,8 +2076,14 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       };
     });
 
-    if (firstCreatedId) {
-      set({ selectedClipId: firstCreatedId, selectedAssetId: null, isInspectorOpen: true });
+    if (pastedCreatedIds.length > 0) {
+      set({
+        selectedClipIds: pastedCreatedIds,
+        selectedClipId: pastedCreatedIds[0],
+        selectedAssetId: null,
+        selectedAssetIds: [],
+        isInspectorOpen: true,
+      });
     }
   },
 
@@ -1470,20 +2145,70 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   updateClipTransformLive: (clipId, transformPatch) => {
     const current = get().currentProject;
     if (!current) return;
+    const playheadTime = get().playheadTime;
+
     set({
       currentProject: {
         ...current,
-        clips: current.clips.map((c) =>
-          c.id === clipId
-            ? {
-                ...c,
-                transform: {
-                  ...c.transform,
-                  ...transformPatch,
-                },
+        clips: current.clips.map((c) => {
+          if (c.id !== clipId) return c;
+
+          const nextTransform = {
+            ...c.transform,
+            ...transformPatch,
+          };
+
+          // Auto-keyframing: si el clip ya tiene keyframes definidos para la propiedad transformada,
+          // actualiza o inserta el keyframe en la posición temporal del cabezal
+          if (c.keyframes && Object.keys(c.keyframes).length > 0) {
+            const timeOffset = Math.max(
+              0,
+              Math.min(c.duration, Number((playheadTime - c.startTime).toFixed(3)))
+            );
+            const nextKeyframes = { ...c.keyframes };
+            let hasKeyframeUpdate = false;
+
+            const animProps: (keyof typeof transformPatch & AnimatableProperty)[] = [
+              'x',
+              'y',
+              'scale',
+              'rotation',
+              'opacity',
+            ];
+
+            for (const prop of animProps) {
+              if (
+                transformPatch[prop] !== undefined &&
+                nextKeyframes[prop] &&
+                nextKeyframes[prop]!.length > 0
+              ) {
+                const val = Number((transformPatch[prop] as number).toFixed(3));
+                const existing = nextKeyframes[prop]!;
+                const newKf: Keyframe = {
+                  id: createId('kf'),
+                  timeOffset,
+                  value: val,
+                  interpolation: 'linear',
+                };
+                nextKeyframes[prop] = insertOrUpdateKeyframe(existing, newKf, 0.033);
+                hasKeyframeUpdate = true;
               }
-            : c
-        ),
+            }
+
+            if (hasKeyframeUpdate) {
+              return {
+                ...c,
+                transform: nextTransform,
+                keyframes: nextKeyframes,
+              };
+            }
+          }
+
+          return {
+            ...c,
+            transform: nextTransform,
+          };
+        }),
       },
     });
   },
@@ -1519,15 +2244,117 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     }));
   },
 
+  setClipKeyframe: async (clipId, property, timeOffset, value, interpolation = 'linear') => {
+    await get().commitProjectUpdate((proj) => ({
+      ...proj,
+      clips: proj.clips.map((clip) => {
+        if (clip.id !== clipId) return clip;
+
+        const clampedOffset = Math.max(0, Math.min(clip.duration, Number(timeOffset.toFixed(3))));
+        const existingKeyframes = clip.keyframes?.[property] || [];
+
+        const newKf: Keyframe = {
+          id: createId('kf'),
+          timeOffset: clampedOffset,
+          value: Number(value.toFixed(3)),
+          interpolation,
+        };
+
+        const updatedTrackKeyframes = insertOrUpdateKeyframe(existingKeyframes, newKf, 0.033);
+
+        return {
+          ...clip,
+          keyframes: {
+            ...(clip.keyframes || {}),
+            [property]: updatedTrackKeyframes,
+          },
+        };
+      }),
+    }));
+  },
+
+  removeClipKeyframe: async (clipId, property, keyframeId) => {
+    await get().commitProjectUpdate((proj) => ({
+      ...proj,
+      clips: proj.clips.map((clip) => {
+        if (clip.id !== clipId || !clip.keyframes?.[property]) return clip;
+
+        const remaining = removeKeyframeById(clip.keyframes[property], keyframeId);
+        const nextKeyframes = { ...clip.keyframes };
+
+        if (remaining.length === 0) {
+          delete nextKeyframes[property];
+        } else {
+          nextKeyframes[property] = remaining;
+        }
+
+        return {
+          ...clip,
+          keyframes: Object.keys(nextKeyframes).length > 0 ? nextKeyframes : undefined,
+        };
+      }),
+    }));
+  },
+
+  clearClipKeyframes: async (clipId, property) => {
+    await get().commitProjectUpdate((proj) => ({
+      ...proj,
+      clips: proj.clips.map((clip) => {
+        if (clip.id !== clipId || !clip.keyframes) return clip;
+
+        if (!property) {
+          const { keyframes: _removed, ...rest } = clip;
+          return rest as TimelineClip;
+        }
+
+        const nextKeyframes = { ...clip.keyframes };
+        delete nextKeyframes[property];
+
+        return {
+          ...clip,
+          keyframes: Object.keys(nextKeyframes).length > 0 ? nextKeyframes : undefined,
+        };
+      }),
+    }));
+  },
+
+  removeSelectedClips: async () => {
+    await get().removeClip();
+  },
+
   removeClip: async (clipId) => {
     const isMagnetic = get().isMainTrackMagnetic;
+    const { selectedClipIds, selectedClipId } = get();
+    const idsToDelete = new Set<string>();
+
+    if (clipId) {
+      if (selectedClipIds.includes(clipId) && selectedClipIds.length > 1) {
+        selectedClipIds.forEach((id) => idsToDelete.add(id));
+      } else {
+        idsToDelete.add(clipId);
+      }
+    } else if (selectedClipIds.length > 0) {
+      selectedClipIds.forEach((id) => idsToDelete.add(id));
+    } else if (selectedClipId) {
+      idsToDelete.add(selectedClipId);
+    }
+
+    if (idsToDelete.size === 0) return;
+
     await get().commitProjectUpdate((proj) => {
-      const target = proj.clips.find((c) => c.id === clipId);
-      if (!target) return proj;
-      const groupId = target.linkGroupId;
-      const remainingClips = proj.clips.filter((c) =>
-        groupId ? c.linkGroupId !== groupId : c.id !== clipId
-      );
+      const linkGroupsToDelete = new Set<string>();
+      proj.clips.forEach((c) => {
+        if (idsToDelete.has(c.id) && c.linkGroupId) {
+          linkGroupsToDelete.add(c.linkGroupId);
+        }
+      });
+
+      const remainingClips = proj.clips.filter((c) => {
+        if (idsToDelete.has(c.id)) return false;
+        if (c.linkGroupId && linkGroupsToDelete.has(c.linkGroupId)) return false;
+        return true;
+      });
+
       const remainingTracks = pruneEmptyTracks(proj.tracks, remainingClips);
       return {
         ...proj,
@@ -1535,9 +2362,12 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         tracks: remainingTracks,
       };
     });
-    if (get().selectedClipId === clipId) {
-      set({ selectedClipId: null, isInspectorOpen: false });
-    }
+
+    set({
+      selectedClipIds: [],
+      selectedClipId: null,
+      isInspectorOpen: false,
+    });
   },
 
   generateSampleMedia: async (kind = 'pack') => {
@@ -1571,7 +2401,9 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       if (newAssets[0]) {
         set({
           selectedAssetId: newAssets[0].id,
+          selectedAssetIds: newAssets.map((a) => a.id),
           selectedClipId: null,
+          selectedClipIds: [],
           isLeftDrawerOpen: true,
         });
       }

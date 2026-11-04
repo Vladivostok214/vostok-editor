@@ -6,6 +6,7 @@ import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { Plugin, ViteDevServer } from 'vite';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { buildFFmpegVolumeExpression } from '../src/lib/keyframeEngine';
 
 const execFileAsync = promisify(execFile);
 
@@ -123,27 +124,31 @@ async function extractWaveformPeaks(filePath: string, samplesCount = 120): Promi
         '-f', 's16le',
         'pipe:1',
       ],
-      { encoding: 'buffer', maxBuffer: 25 * 1024 * 1024 },
+      { encoding: 'buffer', maxBuffer: 35 * 1024 * 1024 },
       (err, stdout) => {
         if (err || !stdout || stdout.length < 4) {
           resolve(Array.from({ length: samplesCount }, () => 0.25));
           return;
         }
         const totalSamples = Math.floor(stdout.length / 2);
-        const blockSize = Math.max(1, Math.floor(totalSamples / samplesCount));
+        if (totalSamples <= 0) {
+          resolve(Array.from({ length: samplesCount }, () => 0.25));
+          return;
+        }
+
         const peaks: number[] = [];
         let maxPeak = 0.01;
+        const step = totalSamples / samplesCount;
 
         for (let i = 0; i < samplesCount; i++) {
-          const start = i * blockSize;
-          let sum = 0;
-          let count = 0;
-          for (let j = 0; j < blockSize && (start + j) < totalSamples; j++) {
-            const sample = Math.abs(stdout.readInt16LE((start + j) * 2)) / 32768;
-            if (sample > sum) sum = sample;
-            count++;
+          const start = Math.floor(i * step);
+          const end = Math.min(totalSamples, Math.max(start + 1, Math.floor((i + 1) * step)));
+          let peak = 0;
+          for (let j = start; j < end; j++) {
+            const sample = Math.abs(stdout.readInt16LE(j * 2)) / 32768;
+            if (sample > peak) peak = sample;
           }
-          const val = count > 0 ? sum : 0.05;
+          const val = (end > start) ? peak : 0.05;
           if (val > maxPeak) maxPeak = val;
           peaks.push(val);
         }
@@ -211,7 +216,9 @@ async function probeMediaFile(filePath: string) {
 
   let waveform: number[] | undefined;
   if (type === 'audio' || (type === 'video' && hasAudio)) {
-    waveform = await extractWaveformPeaks(filePath, 100);
+    // 50 picos por segundo: resolución de 20ms para renderizado continuo NLE
+    const targetSamples = Math.max(120, Math.min(15000, Math.round(duration * 50)));
+    waveform = await extractWaveformPeaks(filePath, targetSamples);
   }
 
   let thumbnail: string | undefined;
@@ -524,6 +531,21 @@ export async function handleMediaBackendRequest(
               asset: assets[0],
               assets,
             });
+          }
+
+          // 7b. On-demand High-Definition Waveform Extraction
+          if (pathname === '/api/media/waveform' && req.method === 'GET') {
+            const filePath = parsedUrl.searchParams.get('path');
+            const durationParam = Number(parsedUrl.searchParams.get('duration') || 0);
+            if (!filePath || !fs.existsSync(filePath)) {
+              return sendJson(res, 400, { error: 'Ruta de archivo inválida o inexistente' });
+            }
+            const samplesParam = Number(parsedUrl.searchParams.get('samples') || 0);
+            const targetSamples = samplesParam > 0
+              ? samplesParam
+              : Math.max(120, Math.min(15000, Math.round(durationParam * 50) || 500));
+            const peaks = await extractWaveformPeaks(filePath, targetSamples);
+            return sendJson(res, 200, { waveform: peaks });
           }
 
           // 8. Upload Drop Fallback into Ephemeral Cache
@@ -862,7 +884,11 @@ export async function handleMediaBackendRequest(
             }
 
             const validAudioClips = (audioClips as any[]).filter(
-              (ac) => ac.path && fs.existsSync(ac.path) && ac.duration > 0.05 && ac.volume > 0
+              (ac) =>
+                ac.path &&
+                fs.existsSync(ac.path) &&
+                ac.duration > 0.05 &&
+                (ac.volume > 0 || (ac.keyframes?.volume && ac.keyframes.volume.length > 0))
             );
 
             // Construir cadenas de filtros de audio si existen clips de audio activos
@@ -879,7 +905,15 @@ export async function handleMediaBackendRequest(
                 const fadeOut = Math.max(0, Number(ac.fadeOut || 0));
                 const delayMs = Math.max(0, Math.round(Number(ac.startTime || 0) * 1000));
 
-                let chain = `[${inputIndex}:a]atrim=start=${srcStart.toFixed(3)}:duration=${dur.toFixed(3)},asetpts=PTS-STARTPTS,volume=${vol.toFixed(2)}`;
+                let volumeFilter = `volume=${vol.toFixed(2)}`;
+                if (ac.keyframes?.volume && Array.isArray(ac.keyframes.volume) && ac.keyframes.volume.length > 0) {
+                  const exprFilter = buildFFmpegVolumeExpression(ac.keyframes.volume, vol);
+                  if (exprFilter) {
+                    volumeFilter = exprFilter;
+                  }
+                }
+
+                let chain = `[${inputIndex}:a]atrim=start=${srcStart.toFixed(3)}:duration=${dur.toFixed(3)},asetpts=PTS-STARTPTS,${volumeFilter}`;
                 if (fadeIn > 0.05 && fadeIn < dur) {
                   chain += `,afade=t=in:st=0:d=${fadeIn.toFixed(2)}`;
                 }

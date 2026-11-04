@@ -2,18 +2,29 @@ import React from 'react';
 import { FlipHorizontal, RotateCcw } from 'lucide-react';
 import type { TimelineClip } from '../../types/project';
 import { useProjectStore } from '../../store/useProjectStore';
+import { evaluatePropertyAtTime } from '../../lib/keyframeEngine';
+import { KeyframeControlGroup } from './KeyframeControlGroup';
 
 interface TransformSectionProps {
   clip: TimelineClip;
 }
 
 export const TransformSection: React.FC<TransformSectionProps> = ({ clip }) => {
+  const playheadTime = useProjectStore((s) => s.playheadTime);
   const updateClipTransformLive = useProjectStore((s) => s.updateClipTransformLive);
   const resetClipTransform = useProjectStore((s) => s.resetClipTransform);
   const flipClipHorizontal = useProjectStore((s) => s.flipClipHorizontal);
   const persistCurrentProject = useProjectStore((s) => s.persistCurrentProject);
 
   const tf = clip.transform || { x: 0, y: 0, scale: 1, rotation: 0, opacity: 1, flipX: false };
+  const timeOffset = Math.max(0, Math.min(clip.duration, Number((playheadTime - clip.startTime).toFixed(3))));
+
+  // Animated values evaluated at current playhead time
+  const currentOpacity = evaluatePropertyAtTime(clip.keyframes?.opacity, tf.opacity, timeOffset);
+  const currentScale = evaluatePropertyAtTime(clip.keyframes?.scale, tf.scale, timeOffset);
+  const currentX = evaluatePropertyAtTime(clip.keyframes?.x, tf.x, timeOffset);
+  const currentY = evaluatePropertyAtTime(clip.keyframes?.y, tf.y, timeOffset);
+  const currentRotation = evaluatePropertyAtTime(clip.keyframes?.rotation, tf.rotation, timeOffset);
 
   return (
     <div className="space-y-3 pt-3 border-t border-white/[0.06]">
@@ -35,13 +46,18 @@ export const TransformSection: React.FC<TransformSectionProps> = ({ clip }) => {
       <div className="space-y-1.5">
         <div className="flex items-center justify-between">
           <label className="text-xs text-gray-300 font-medium">Opacidad</label>
+          <KeyframeControlGroup
+            clip={clip}
+            property="opacity"
+            currentValue={currentOpacity}
+          />
         </div>
         <div className="flex items-center gap-2.5">
           <input
             type="range"
             min={0}
             max={100}
-            value={Math.round(tf.opacity * 100)}
+            value={Math.round(currentOpacity * 100)}
             onChange={(e) => {
               updateClipTransformLive(clip.id, {
                 opacity: Math.max(0, Math.min(1, Number(e.target.value) / 100)),
@@ -51,7 +67,7 @@ export const TransformSection: React.FC<TransformSectionProps> = ({ clip }) => {
             className="flex-1 h-1 accent-[#00d4e5] bg-[#32343a] rounded-lg cursor-pointer"
           />
           <div className="w-16 px-2 py-1 rounded-lg bg-white/[0.04] border border-white/[0.08] text-center font-mono text-gray-100 text-xs">
-            {Math.round(tf.opacity * 100)} %
+            {Math.round(currentOpacity * 100)} %
           </div>
         </div>
       </div>
@@ -60,13 +76,18 @@ export const TransformSection: React.FC<TransformSectionProps> = ({ clip }) => {
       <div className="space-y-1.5 pt-2 border-t border-white/[0.04]">
         <div className="flex items-center justify-between">
           <label className="text-xs text-gray-300 font-medium">Escala</label>
+          <KeyframeControlGroup
+            clip={clip}
+            property="scale"
+            currentValue={currentScale}
+          />
         </div>
         <div className="flex items-center gap-2.5">
           <input
             type="range"
             min={15}
             max={300}
-            value={Math.round(tf.scale * 100)}
+            value={Math.round(currentScale * 100)}
             onChange={(e) => {
               updateClipTransformLive(clip.id, {
                 scale: Math.max(0.15, Number(e.target.value) / 100),
@@ -76,20 +97,27 @@ export const TransformSection: React.FC<TransformSectionProps> = ({ clip }) => {
             className="flex-1 h-1 accent-[#00d4e5] bg-[#32343a] rounded-lg cursor-pointer"
           />
           <div className="w-16 px-2 py-1 rounded-lg bg-white/[0.04] border border-white/[0.08] text-center font-mono text-gray-100 text-xs">
-            {Math.round(tf.scale * 100)} %
+            {Math.round(currentScale * 100)} %
           </div>
         </div>
       </div>
 
       {/* Position X & Y */}
       <div className="space-y-1.5 pt-2 border-t border-white/[0.04]">
-        <label className="text-xs text-gray-300 font-medium block">Posición</label>
+        <div className="flex items-center justify-between">
+          <label className="text-xs text-gray-300 font-medium block">Posición</label>
+          <KeyframeControlGroup
+            clip={clip}
+            property={['x', 'y']}
+            currentValue={[currentX, currentY]}
+          />
+        </div>
         <div className="grid grid-cols-2 gap-2">
           <div className="flex items-center bg-white/[0.04] border border-white/[0.08] rounded-lg px-2.5 py-1">
             <span className="text-gray-400 mr-2 font-mono text-xs">X</span>
             <input
               type="number"
-              value={tf.x}
+              value={Math.round(currentX)}
               onChange={(e) => {
                 updateClipTransformLive(clip.id, {
                   x: Number(e.target.value) || 0,
@@ -103,7 +131,7 @@ export const TransformSection: React.FC<TransformSectionProps> = ({ clip }) => {
             <span className="text-gray-400 mr-2 font-mono text-xs">Y</span>
             <input
               type="number"
-              value={tf.y}
+              value={Math.round(currentY)}
               onChange={(e) => {
                 updateClipTransformLive(clip.id, {
                   y: Number(e.target.value) || 0,
@@ -118,13 +146,20 @@ export const TransformSection: React.FC<TransformSectionProps> = ({ clip }) => {
 
       {/* Rotation */}
       <div className="space-y-1.5 pt-2 border-t border-white/[0.04]">
-        <label className="text-xs text-gray-300 font-medium block">Rotación</label>
+        <div className="flex items-center justify-between">
+          <label className="text-xs text-gray-300 font-medium block">Rotación</label>
+          <KeyframeControlGroup
+            clip={clip}
+            property="rotation"
+            currentValue={currentRotation}
+          />
+        </div>
         <div className="flex items-center gap-2.5">
           <input
             type="range"
             min={-180}
             max={180}
-            value={tf.rotation}
+            value={Math.round(currentRotation)}
             onChange={(e) => {
               updateClipTransformLive(clip.id, {
                 rotation: Number(e.target.value) || 0,
@@ -134,7 +169,7 @@ export const TransformSection: React.FC<TransformSectionProps> = ({ clip }) => {
             className="flex-1 h-1 accent-[#00d4e5] bg-[#32343a] rounded-lg cursor-pointer"
           />
           <div className="w-16 px-2 py-1 rounded-lg bg-white/[0.04] border border-white/[0.08] text-center font-mono text-gray-100 text-xs">
-            {tf.rotation}°
+            {Math.round(currentRotation)}°
           </div>
         </div>
       </div>
@@ -158,3 +193,4 @@ export const TransformSection: React.FC<TransformSectionProps> = ({ clip }) => {
     </div>
   );
 };
+export default TransformSection;

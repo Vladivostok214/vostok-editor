@@ -490,14 +490,31 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose }) => 
           const visibleStart = Math.max(exportStartSec, c.startTime);
           const visibleEnd = Math.min(exportEndSec, clipEnd);
           const cutFromLeft = Math.max(0, visibleStart - c.startTime);
+          const segDuration = Math.max(0.05, visibleEnd - visibleStart);
+          const keyframes = c.keyframes?.volume
+            ? {
+                volume: c.keyframes.volume
+                  .map((k) => ({
+                    ...k,
+                    timeOffset: Number((k.timeOffset - cutFromLeft).toFixed(3)),
+                  }))
+                  .filter((k) => k.timeOffset >= -0.05 && k.timeOffset <= segDuration + 0.05)
+                  .map((k) => ({
+                    ...k,
+                    timeOffset: Math.max(0, Math.min(segDuration, k.timeOffset)),
+                  })),
+              }
+            : undefined;
+
           return {
             path: asset?.path,
             startTime: Number((visibleStart - exportStartSec).toFixed(3)),
-            duration: Number(Math.max(0.05, visibleEnd - visibleStart).toFixed(3)),
+            duration: Number(segDuration.toFixed(3)),
             sourceStart: Number((c.sourceStart + cutFromLeft).toFixed(3)),
             volume: c.volume,
             fadeIn: cutFromLeft > 0.05 ? 0 : c.fadeIn,
             fadeOut: visibleEnd < clipEnd - 0.05 ? 0 : c.fadeOut,
+            keyframes,
           };
         })
         .filter((item) => Boolean(item.path));
@@ -816,7 +833,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose }) => 
               <button
                 type="button"
                 onClick={handleStartExport}
-                className="px-5 py-2 rounded-xl bg-[#2563eb] hover:bg-[#3b82f6] text-white font-semibold text-xs flex items-center gap-1.5 shadow transition"
+                className="px-5 py-2 rounded-xl bg-[#00d4e5] hover:bg-[#19e3f3] text-[#0d0e11] font-semibold text-xs flex items-center gap-1.5 shadow transition"
               >
                 <Download className="w-3.5 h-3.5" />
                 Exportar

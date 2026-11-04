@@ -45,6 +45,8 @@ import {
 import { CanvasPreviewStage } from './CanvasPreviewStage';
 import { InspectorPanel } from './inspector/InspectorPanel';
 import { ExportModal } from './ExportModal';
+import { AssetDragLayer } from './AssetDragLayer';
+import { beginAssetDrag } from '../lib/timelineDrop';
 import type { TextConfig, TransitionType } from '../types/project';
 
 function formatBytes(bytes = 0): string {
@@ -79,7 +81,9 @@ export const EditorWorkspace: React.FC = () => {
     playheadTime,
     isPlaying,
     selectedAssetId,
+    selectedAssetIds,
     selectedClipId,
+    selectedClipIds,
     isFullscreenPreview,
     isTimelineCollapsed,
     isLeftDrawerOpen,
@@ -90,7 +94,13 @@ export const EditorWorkspace: React.FC = () => {
     errorMessage,
     closeProjectToHome,
     selectAsset,
+    setSelectedAssetIds,
+    selectAllAssets,
+    clearAssetSelection,
+    removeSelectedAssetsFromLibrary,
     selectClip,
+    selectAllClips,
+    clearClipSelection,
     setPlayheadTime,
     setIsPlaying,
     togglePlay,
@@ -110,6 +120,7 @@ export const EditorWorkspace: React.FC = () => {
     importDroppedFiles,
     removeAssetFromLibrary,
     addAssetToTimeline,
+    addAssetsToTimeline,
     addTextTemplateToProject,
     splitClipAtPlayhead,
     duplicateClip,
@@ -135,6 +146,159 @@ export const EditorWorkspace: React.FC = () => {
   const [isDraggingOverDrawer, setIsDraggingOverDrawer] = useState(false);
   const [timelineHeight, setTimelineHeight] = useState(255);
   const fullscreenScrubRef = useRef<HTMLDivElement | null>(null);
+  const drawerScrollRef = useRef<HTMLDivElement | null>(null);
+  const drawerMarqueeRef = useRef<HTMLDivElement | null>(null);
+
+  const handleDrawerMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return;
+    const target = e.target as HTMLElement;
+
+    // Do not start marquee if clicking inside buttons, inputs, or directly on an asset card
+    if (target.closest('button, input, select, textarea')) return;
+    if (target.closest('[data-asset-id]')) return;
+
+    const container = drawerScrollRef.current;
+    if (!container) return;
+
+    const isModifier = e.shiftKey || e.ctrlKey || e.metaKey;
+    const initialSelectedIds = isModifier ? [...selectedAssetIds] : [];
+    let lastSelection = [...initialSelectedIds];
+    const startClientX = e.clientX;
+    const startClientY = e.clientY;
+
+    const cRect = container.getBoundingClientRect();
+    const anchorContentX = startClientX - cRect.left + container.scrollLeft;
+    const anchorContentY = startClientY - cRect.top + container.scrollTop;
+
+    // Pre-measure all asset cards once at drag start in content coordinates (prevents layout thrashing on every mousemove)
+    const cachedCards = Array.from(container.querySelectorAll<HTMLElement>('[data-asset-id]')).map((el) => {
+      const r = el.getBoundingClientRect();
+      const x1 = r.left - cRect.left + container.scrollLeft;
+      const y1 = r.top - cRect.top + container.scrollTop;
+      return {
+        id: el.getAttribute('data-asset-id') || '',
+        x1,
+        x2: x1 + r.width,
+        y1,
+        y2: y1 + r.height,
+      };
+    });
+
+    let isMarquee = false;
+    let rafId: number | null = null;
+    let lastClientX = startClientX;
+    let lastClientY = startClientY;
+
+    const scheduleFrame = () => {
+      if (rafId !== null) return;
+      rafId = requestAnimationFrame(processFrame);
+    };
+
+    const processFrame = () => {
+      rafId = null;
+      if (!container) return;
+
+      const currentRect = container.getBoundingClientRect();
+      const edgeThreshold = 35;
+      const scrollSpeed = 8;
+      let didScroll = false;
+
+      // Vertical auto-scroll if pointer is near container boundaries
+      if (lastClientY < currentRect.top + edgeThreshold) {
+        const prevScroll = container.scrollTop;
+        container.scrollTop = Math.max(0, container.scrollTop - scrollSpeed);
+        if (container.scrollTop !== prevScroll) didScroll = true;
+      } else if (lastClientY > currentRect.bottom - edgeThreshold) {
+        const prevScroll = container.scrollTop;
+        container.scrollTop += scrollSpeed;
+        if (container.scrollTop !== prevScroll) didScroll = true;
+      }
+
+      const currentScrollTop = container.scrollTop;
+      const currentScrollLeft = container.scrollLeft;
+      const currentX = lastClientX - currentRect.left + currentScrollLeft;
+      const currentY = lastClientY - currentRect.top + currentScrollTop;
+
+      const minX = Math.min(anchorContentX, currentX);
+      const maxX = Math.max(anchorContentX, currentX);
+      const minY = Math.min(anchorContentY, currentY);
+      const maxY = Math.max(anchorContentY, currentY);
+
+      // Direct DOM style update on marquee element (avoids whole EditorWorkspace React re-renders)
+      const marqueeEl = drawerMarqueeRef.current;
+      if (marqueeEl) {
+        marqueeEl.style.left = `${minX}px`;
+        marqueeEl.style.top = `${minY}px`;
+        marqueeEl.style.width = `${Math.max(1, maxX - minX)}px`;
+        marqueeEl.style.height = `${Math.max(1, maxY - minY)}px`;
+      }
+
+      // Fast in-memory hit-test against cached card bounds (zero DOM queries)
+      const intersectedIds = new Set<string>();
+      for (let i = 0; i < cachedCards.length; i++) {
+        const c = cachedCards[i];
+        if (minX <= c.x2 && maxX >= c.x1 && minY <= c.y2 && maxY >= c.y1) {
+          intersectedIds.add(c.id);
+        }
+      }
+
+      const finalSelection = isModifier
+        ? Array.from(new Set([...initialSelectedIds, ...intersectedIds]))
+        : Array.from(intersectedIds);
+
+      // Only dispatch to Zustand if the selection set has actually changed
+      if (
+        finalSelection.length !== lastSelection.length ||
+        finalSelection.some((id, idx) => id !== lastSelection[idx])
+      ) {
+        lastSelection = finalSelection;
+        setSelectedAssetIds(finalSelection);
+      }
+
+      // If still auto-scrolling at the edge, keep RAF loop alive
+      if (didScroll) {
+        scheduleFrame();
+      }
+    };
+
+    const onMouseMove = (moveEvt: MouseEvent) => {
+      lastClientX = moveEvt.clientX;
+      lastClientY = moveEvt.clientY;
+
+      if (!isMarquee) {
+        const dist = Math.hypot(moveEvt.clientX - startClientX, moveEvt.clientY - startClientY);
+        if (dist >= 4) {
+          isMarquee = true;
+          if (drawerMarqueeRef.current) {
+            drawerMarqueeRef.current.style.display = 'block';
+          }
+        }
+      }
+
+      if (isMarquee) {
+        scheduleFrame();
+      }
+    };
+
+    const onMouseUp = () => {
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+      if (rafId !== null) {
+        cancelAnimationFrame(rafId);
+        rafId = null;
+      }
+      if (drawerMarqueeRef.current) {
+        drawerMarqueeRef.current.style.display = 'none';
+      }
+
+      if (!isMarquee && !isModifier) {
+        clearAssetSelection();
+      }
+    };
+
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+  };
 
   const startResizeTimeline = (e: React.MouseEvent) => {
     e.preventDefault();
@@ -311,10 +475,47 @@ export const EditorWorkspace: React.FC = () => {
         return;
       }
 
-      if (e.key === 'Delete' || e.key === 'Backspace') {
-        if (selectedClipId) {
+      // Ctrl + A -> Seleccionar todos (clips o medios de la biblioteca)
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') {
+        const activeTag = (document.activeElement?.tagName || '').toLowerCase();
+        if (activeTag !== 'input' && activeTag !== 'textarea') {
           e.preventDefault();
-          removeClip(selectedClipId);
+          const { isLeftDrawerOpen, selectedAssetIds, selectedClipIds } = useProjectStore.getState();
+          const isDrawerTarget =
+            Boolean(document.activeElement?.closest('[data-drawer-media]')) ||
+            (isLeftDrawerOpen && selectedAssetIds.length > 0 && selectedClipIds.length === 0);
+
+          if (isDrawerTarget) {
+            selectAllAssets(leftTab === 'audio' ? 'audio' : 'media');
+          } else {
+            selectAllClips();
+          }
+          return;
+        }
+      }
+
+      // Escape -> Deseleccionar
+      if (e.key === 'Escape') {
+        const { selectedAssetIds, selectedClipIds, clearAssetSelection, clearClipSelection } =
+          useProjectStore.getState();
+        if (selectedAssetIds.length > 0) {
+          clearAssetSelection();
+        }
+        if (selectedClipIds.length > 0) {
+          clearClipSelection();
+        }
+        return;
+      }
+
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        const { selectedClipId, selectedClipIds, selectedAssetId, selectedAssetIds } =
+          useProjectStore.getState();
+        if (selectedClipId || selectedClipIds.length > 0) {
+          e.preventDefault();
+          removeClip();
+        } else if (selectedAssetIds.length > 0 || selectedAssetId) {
+          e.preventDefault();
+          removeSelectedAssetsFromLibrary();
         }
       }
     };
@@ -340,6 +541,9 @@ export const EditorWorkspace: React.FC = () => {
     undo,
     redo,
     selectedClipId,
+    selectedClipIds,
+    selectAllClips,
+    clearClipSelection,
     removeClip,
   ]);
 
@@ -486,55 +690,137 @@ export const EditorWorkspace: React.FC = () => {
         >
           {/* Drawer Header (aligned with top header height) */}
           <div className="h-12 px-4 border-b border-[#26272b] flex items-center justify-between shrink-0">
-            <span className="text-xs font-semibold text-gray-100">
-              {leftTab === 'media'
-                ? 'Cargas'
-                : leftTab === 'audio'
-                ? 'Audio'
-                : leftTab === 'text'
-                ? 'Texto y Títulos'
-                : 'Transiciones'}
-            </span>
-            <span className="text-[11px] text-gray-500">
-              {leftTab === 'media' || leftTab === 'audio'
-                ? `${visibleAssets.length}`
-                : ''}
-            </span>
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="text-xs font-semibold text-gray-100 shrink-0">
+                {leftTab === 'media'
+                  ? 'Cargas'
+                  : leftTab === 'audio'
+                  ? 'Audio'
+                  : leftTab === 'text'
+                  ? 'Texto y Títulos'
+                  : 'Transiciones'}
+              </span>
+              {(leftTab === 'media' || leftTab === 'audio') && selectedAssetIds.length > 1 && (
+                <span className="px-1.5 py-0.5 rounded-full bg-[#00d4e5]/20 text-[#00d4e5] border border-[#00d4e5]/40 text-[10px] font-bold shrink-0">
+                  {selectedAssetIds.length} selecc.
+                </span>
+              )}
+            </div>
+
+            <div className="flex items-center gap-1 shrink-0">
+              {(leftTab === 'media' || leftTab === 'audio') && selectedAssetIds.length > 0 ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => addAssetsToTimeline(selectedAssetIds, { startTime: playheadTime })}
+                    title={`Agregar ${selectedAssetIds.length} archivos a la línea de tiempo`}
+                    className="p-1 rounded text-gray-200 hover:text-[#00d4e5] hover:bg-white/10 transition"
+                  >
+                    <Plus className="w-3.5 h-3.5 stroke-[2.5]" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => removeSelectedAssetsFromLibrary()}
+                    title={`Eliminar ${selectedAssetIds.length} archivos`}
+                    className="p-1 rounded text-gray-200 hover:text-rose-400 hover:bg-white/10 transition"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => clearAssetSelection()}
+                    title="Deseleccionar"
+                    className="p-1 rounded text-gray-400 hover:text-white hover:bg-white/10 transition"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </>
+              ) : (
+                <span className="text-[11px] text-gray-500">
+                  {leftTab === 'media' || leftTab === 'audio' ? `${visibleAssets.length}` : ''}
+                </span>
+              )}
+            </div>
           </div>
 
           {/* Drawer Body */}
           {leftTab === 'media' || leftTab === 'audio' ? (
-            <div className="flex-1 overflow-y-auto p-3">
+            <div
+              ref={drawerScrollRef}
+              onMouseDown={handleDrawerMouseDown}
+              data-drawer-media="true"
+              className="flex-1 overflow-y-auto p-3 relative select-none"
+            >
+              {/* Fast Direct-DOM Rubber-band Marquee Selection Box (Zero-Cost for GPU in WebKitGTK) */}
+              <div
+                ref={drawerMarqueeRef}
+                style={{
+                  display: 'none',
+                  position: 'absolute',
+                  pointerEvents: 'none',
+                  zIndex: 50,
+                }}
+                className="bg-[#00d4e5]/20 border border-[#00d4e5] rounded pointer-events-none"
+              />
+
               {/* 2-Column Thumbnail Grid with `[☁️ Cargar]` as First Card */}
               <div className="grid grid-cols-2 gap-2.5">
                 {/* First Card: Cargar */}
                 <button
                   type="button"
                   onClick={() => setIsFileBrowserOpen(true)}
-                  className="h-24 rounded-xl bg-[#25262b] hover:bg-[#2e3036] border border-[#32343a] flex flex-col items-center justify-center gap-1.5 text-gray-200 transition group"
+                  className="h-24 rounded-xl bg-[#25262b] hover:bg-[#2e3036] border border-[#32343a] flex flex-col items-center justify-center gap-1.5 text-gray-200 transition-colors duration-75 group"
                 >
-                  <CloudUpload className="w-5 h-5 text-gray-300 group-hover:text-[#00d4e5] transition" />
+                  <CloudUpload className="w-5 h-5 text-gray-300 group-hover:text-[#00d4e5] transition-colors" />
                   <span className="text-xs font-medium">Cargar</span>
                 </button>
 
                 {/* Imported Media Asset Cards */}
                 {visibleAssets.map((asset) => {
-                  const isSelected = selectedAssetId === asset.id;
+                  const isSelected = selectedAssetIds.includes(asset.id) || selectedAssetId === asset.id;
                   const isAddedToTimeline = usedAssetIds.has(asset.id);
 
                   return (
                     <div
                       key={asset.id}
-                      draggable
-                      onDragStart={(e) => {
-                        e.dataTransfer.setData('application/x-video-editor-asset', asset.id);
+                      data-asset-id={asset.id}
+                      onDragStart={(e) => e.preventDefault()}
+                      onMouseDown={(e) => {
+                        // No iniciar arrastre desde los botones de la tarjeta (quitar / agregar)
+                        if ((e.target as HTMLElement).closest('button')) return;
+                        const isModifier = e.shiftKey || e.ctrlKey || e.metaKey;
+                        const isAlreadySelected = selectedAssetIds.includes(asset.id);
+
+                        if (isModifier) {
+                          selectAsset(asset.id, 'toggle');
+                          return;
+                        }
+
+                        if (!isAlreadySelected) {
+                          selectAsset(asset.id, 'replace');
+                        }
+
+                        beginAssetDrag(e, asset.id);
                       }}
-                      onClick={() => selectAsset(asset.id)}
-                      onDoubleClick={() => addAssetToTimeline(asset.id, { startTime: playheadTime })}
+                      onClick={(e) => {
+                        if ((e.target as HTMLElement).closest('button')) return;
+                        const isModifier = e.shiftKey || e.ctrlKey || e.metaKey;
+                        if (!isModifier && selectedAssetIds.includes(asset.id) && selectedAssetIds.length > 1) {
+                          selectAsset(asset.id, 'replace');
+                        }
+                      }}
+                      onDoubleClick={(e) => {
+                        if ((e.target as HTMLElement).closest('button')) return;
+                        if (selectedAssetIds.includes(asset.id) && selectedAssetIds.length > 1) {
+                          addAssetsToTimeline(selectedAssetIds, { startTime: playheadTime });
+                        } else {
+                          addAssetToTimeline(asset.id, { startTime: playheadTime });
+                        }
+                      }}
                       title={`${asset.name} — Arrastra a la línea de tiempo o haz clic en +`}
-                      className={`h-24 rounded-xl overflow-hidden bg-white/[0.04] border relative group cursor-grab active:cursor-grabbing transition ${
+                      className={`h-24 rounded-xl overflow-hidden bg-white/[0.04] border relative group cursor-grab active:cursor-grabbing transition-colors duration-75 ${
                         isSelected
-                          ? 'border-[#00d4e5] ring-1 ring-[#00d4e5]'
+                          ? 'border-[#00d4e5] ring-2 ring-[#00d4e5]'
                           : 'border-[#2c2d32] hover:border-gray-500'
                       }`}
                     >
@@ -542,10 +828,10 @@ export const EditorWorkspace: React.FC = () => {
                         <img
                           src={asset.thumbnail}
                           alt={asset.name}
-                          className="w-full h-full object-cover"
+                          className="w-full h-full object-cover pointer-events-none"
                         />
                       ) : (
-                        <div className="w-full h-full flex flex-col items-center justify-center bg-[#1c1d21] p-2">
+                        <div className="w-full h-full flex flex-col items-center justify-center bg-[#1c1d21] p-2 pointer-events-none">
                           {asset.type === 'audio' ? (
                             <Music className="w-5 h-5 text-[#00d4e5] mb-1" />
                           ) : asset.type === 'image' ? (
@@ -559,15 +845,26 @@ export const EditorWorkspace: React.FC = () => {
                         </div>
                       )}
 
+                      {/* Selection Checkmark Badge */}
+                      {isSelected && (
+                        <span className="absolute top-1.5 left-1.5 w-4 h-4 rounded-full bg-[#00d4e5] text-[#141517] flex items-center justify-center font-bold text-[9px] shadow-sm z-10">
+                          ✓
+                        </span>
+                      )}
+
                       {/* Top-Left Badge: `Agregado` when used on timeline */}
                       {isAddedToTimeline && (
-                        <span className="absolute top-1.5 left-1.5 px-1.5 py-0.5 rounded bg-black/75 text-[10px] font-medium text-gray-200 backdrop-blur-xs">
+                        <span
+                          className={`absolute top-1.5 ${
+                            isSelected ? 'left-6.5' : 'left-1.5'
+                          } px-1.5 py-0.5 rounded bg-black/85 text-[10px] font-medium text-gray-200 transition-all z-10`}
+                        >
                           Agregado
                         </span>
                       )}
 
                       {/* Bottom-Left Badge: Duration `00:25` */}
-                      <span className="absolute bottom-1.5 left-1.5 px-1.5 py-0.5 rounded bg-black/75 text-[10px] font-mono text-gray-100 backdrop-blur-xs">
+                      <span className="absolute bottom-1.5 left-1.5 px-1.5 py-0.5 rounded bg-black/85 text-[10px] font-mono text-gray-100 pointer-events-none">
                         {formatAssetDurationBadge(asset.duration)}
                       </span>
 
@@ -576,10 +873,18 @@ export const EditorWorkspace: React.FC = () => {
                         type="button"
                         onClick={(e) => {
                           e.stopPropagation();
-                          removeAssetFromLibrary(asset.id);
+                          if (selectedAssetIds.includes(asset.id) && selectedAssetIds.length > 1) {
+                            removeSelectedAssetsFromLibrary();
+                          } else {
+                            removeAssetFromLibrary(asset.id);
+                          }
                         }}
-                        title="Quitar de cargas"
-                        className="absolute top-1.5 right-1.5 p-1 rounded-md bg-black/70 text-gray-300 hover:text-rose-400 opacity-0 group-hover:opacity-100 transition"
+                        title={
+                          selectedAssetIds.includes(asset.id) && selectedAssetIds.length > 1
+                            ? `Quitar ${selectedAssetIds.length} seleccionados`
+                            : 'Quitar de cargas'
+                        }
+                        className="absolute top-1.5 right-1.5 p-1 rounded-md bg-black/70 text-gray-300 hover:text-rose-400 opacity-0 group-hover:opacity-100 transition z-10"
                       >
                         <Trash2 className="w-3 h-3" />
                       </button>
@@ -588,10 +893,18 @@ export const EditorWorkspace: React.FC = () => {
                         type="button"
                         onClick={(e) => {
                           e.stopPropagation();
-                          addAssetToTimeline(asset.id, { startTime: playheadTime });
+                          if (selectedAssetIds.includes(asset.id) && selectedAssetIds.length > 1) {
+                            addAssetsToTimeline(selectedAssetIds, { startTime: playheadTime });
+                          } else {
+                            addAssetToTimeline(asset.id, { startTime: playheadTime });
+                          }
                         }}
-                        title="Agregar a la línea de tiempo"
-                        className="absolute bottom-1.5 right-1.5 w-6 h-6 rounded-lg bg-[#00d4e5] text-[#141517] flex items-center justify-center opacity-0 group-hover:opacity-100 shadow transition hover:scale-105"
+                        title={
+                          selectedAssetIds.includes(asset.id) && selectedAssetIds.length > 1
+                            ? `Agregar ${selectedAssetIds.length} seleccionados a la línea de tiempo`
+                            : 'Agregar a la línea de tiempo'
+                        }
+                        className="absolute bottom-1.5 right-1.5 w-6 h-6 rounded-lg bg-[#00d4e5] text-[#141517] flex items-center justify-center opacity-0 group-hover:opacity-100 shadow transition hover:scale-105 z-10"
                       >
                         <Plus className="w-3.5 h-3.5 stroke-[2.5]" />
                       </button>
@@ -774,7 +1087,7 @@ export const EditorWorkspace: React.FC = () => {
                   setIsPlaying(false);
                   setIsExportModalOpen(true);
                 }}
-                className="px-3.5 py-1.5 rounded-lg bg-[#2563eb] hover:bg-[#3b82f6] disabled:opacity-40 text-white font-semibold text-xs flex items-center gap-1.5 shadow transition"
+                className="px-3.5 py-1.5 rounded-lg bg-[#00d4e5] hover:bg-[#19e3f3] disabled:opacity-40 text-[#0d0e11] font-semibold text-xs flex items-center gap-1.5 shadow transition"
               >
                 <Upload className="w-3.5 h-3.5" />
                 Exportar
@@ -919,6 +1232,9 @@ export const EditorWorkspace: React.FC = () => {
           }
         }}
       />
+
+      {/* Fantasma e indicador de destino al arrastrar medios y clips en la línea de tiempo */}
+      <AssetDragLayer />
 
       {/* FFmpeg MP4 Export Modal */}
       <ExportModal

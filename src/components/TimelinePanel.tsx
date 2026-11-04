@@ -24,9 +24,18 @@ import {
   PanelBottomClose,
   PanelBottomOpen,
   Magnet,
+  Music,
+  Image as ImageIcon,
+  Type as TypeIcon,
 } from 'lucide-react';
 import { useProjectStore } from '../store/useProjectStore';
+import { apiUrl } from '../config/api';
+import { computeDropTarget } from '../lib/timelineDrop';
+import type { DropTarget } from '../lib/timelineDrop';
 import type { TimelineClip, Track } from '../types/project';
+import { AudioWaveformCanvas } from './AudioWaveformCanvas';
+import { ClipKeyframeMarkers } from './timeline/ClipKeyframeMarkers';
+import { VolumeRubberBand } from './timeline/VolumeRubberBand';
 
 const TRACK_HEADER_WIDTH = 84;
 
@@ -96,10 +105,14 @@ export const TimelinePanel: React.FC<{ heightPx?: number }> = ({ heightPx = 270 
     isPlaying,
     timelineZoom,
     selectedClipId,
+    selectedClipIds,
     clipboardClips,
     isTimelineCollapsed,
     isMainTrackMagnetic,
     selectClip,
+    setSelectedClipIds,
+    selectAllClips,
+    clearClipSelection,
     setPlayheadTime,
     togglePlay,
     setTimelineZoom,
@@ -117,6 +130,8 @@ export const TimelinePanel: React.FC<{ heightPx?: number }> = ({ heightPx = 270 
     addAssetToTimeline,
     importDroppedFiles,
     moveClipLive,
+    moveSelectedClipsLive,
+    moveClipToNewTrack,
     trimClipLive,
     splitClipAtPlayhead,
     duplicateClip,
@@ -127,12 +142,19 @@ export const TimelinePanel: React.FC<{ heightPx?: number }> = ({ heightPx = 270 
     pasteClipboardAtPlayhead,
     toggleClipLinkGroup,
     removeClip,
+    removeSelectedClips,
   } = useProjectStore();
 
   const timelineScrollRef = useRef<HTMLDivElement | null>(null);
   const collapsedBarRef = useRef<HTMLDivElement | null>(null);
   const [dragOverTrackId, setDragOverTrackId] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  const [marqueeBox, setMarqueeBox] = useState<{
+    left: number;
+    top: number;
+    width: number;
+    height: number;
+  } | null>(null);
 
   // Close context menu on any outside click or Escape
   useEffect(() => {
@@ -150,6 +172,38 @@ export const TimelinePanel: React.FC<{ heightPx?: number }> = ({ heightPx = 270 
       window.removeEventListener('keydown', handleKey);
     };
   }, [contextMenu]);
+
+  // Upgrade legacy/missing waveforms in the background
+  useEffect(() => {
+    if (!currentProject) return;
+    const assetsToUpgrade = currentProject.assets.filter(
+      (a) =>
+        (a.type === 'audio' || a.hasAudio) &&
+        (!a.waveform || a.waveform.length <= 100) &&
+        a.path
+    );
+    if (assetsToUpgrade.length === 0) return;
+
+    let isMounted = true;
+    assetsToUpgrade.forEach(async (asset) => {
+      try {
+        const res = await fetch(
+          apiUrl(`/api/media/waveform?path=${encodeURIComponent(asset.path)}&duration=${asset.duration || 0}`)
+        );
+        if (!res.ok) return;
+        const data = await res.json();
+        if (isMounted && data.waveform && Array.isArray(data.waveform)) {
+          useProjectStore.getState().updateAssetWaveform(asset.id, data.waveform);
+        }
+      } catch {
+        // Ignore background upgrade errors
+      }
+    });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [currentProject?.assets]);
 
   // Improvement 4: Ctrl + Mouse Wheel Zoom centered at cursor position
   useEffect(() => {
@@ -278,39 +332,293 @@ export const TimelinePanel: React.FC<{ heightPx?: number }> = ({ heightPx = 270 
     window.addEventListener('mouseup', onMouseUp);
   };
 
-  // Dragging a Clip body
+  // Marquee Rubber-Band Box Selection on Timeline Canvas
+  const handleTimelineMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+    // Only primary mouse button (left-click)
+    if (e.button !== 0) return;
+
+    const target = e.target as HTMLElement;
+    if (
+      target.closest('[data-clip-id]') ||
+      target.closest('[data-trim-handle]') ||
+      target.closest('[data-track-header]') ||
+      target.closest('[data-timeline-ruler]') ||
+      target.closest('button') ||
+      target.closest('input')
+    ) {
+      return;
+    }
+
+    setContextMenu(null);
+
+    const container = timelineScrollRef.current;
+    if (!container) return;
+
+    const startClientX = e.clientX;
+    const startClientY = e.clientY;
+    const cRectInitial = container.getBoundingClientRect();
+    const anchorContentX = startClientX - cRectInitial.left + container.scrollLeft;
+    const anchorContentY = startClientY - cRectInitial.top + container.scrollTop;
+
+    const isModifier = e.shiftKey || e.ctrlKey || e.metaKey;
+    const initialSelectedIds = isModifier ? [...useProjectStore.getState().selectedClipIds] : [];
+    let lastSelection = [...initialSelectedIds];
+
+    let isMarquee = false;
+    let autoScrollRaf: number | null = null;
+    let marqueeRaf: number | null = null;
+    let lastClientX = startClientX;
+    let lastClientY = startClientY;
+
+    const stopAutoScroll = () => {
+      if (autoScrollRaf !== null) {
+        cancelAnimationFrame(autoScrollRaf);
+        autoScrollRaf = null;
+      }
+    };
+
+    const scheduleFrame = () => {
+      if (marqueeRaf !== null) return;
+      marqueeRaf = requestAnimationFrame(() => {
+        marqueeRaf = null;
+        updateSelection(lastClientX, lastClientY);
+      });
+    };
+
+    const performAutoScroll = () => {
+      if (!container || !isMarquee) return;
+      const cRect = container.getBoundingClientRect();
+      const margin = 35;
+      const scrollSpeed = 12;
+
+      let dx = 0;
+      let dy = 0;
+
+      if (lastClientX > cRect.right - margin) {
+        dx = scrollSpeed;
+      } else if (lastClientX < cRect.left + margin) {
+        dx = -scrollSpeed;
+      }
+
+      if (lastClientY > cRect.bottom - margin) {
+        dy = scrollSpeed;
+      } else if (lastClientY < cRect.top + margin) {
+        dy = -scrollSpeed;
+      }
+
+      if (dx !== 0 || dy !== 0) {
+        container.scrollBy(dx, dy);
+        scheduleFrame();
+      }
+
+      autoScrollRaf = requestAnimationFrame(performAutoScroll);
+    };
+
+    const updateSelection = (currentClientX: number, currentClientY: number) => {
+      if (!container) return;
+      const cRect = container.getBoundingClientRect();
+      const scrollLeft = container.scrollLeft;
+      const scrollTop = container.scrollTop;
+
+      // Current cursor position in container scroll space
+      const currentX = currentClientX - cRect.left + scrollLeft;
+      const currentY = currentClientY - cRect.top + scrollTop;
+
+      // Origin anchor remains fixed at the exact content position where the click began
+      const minX = Math.min(anchorContentX, currentX);
+      const maxX = Math.max(anchorContentX, currentX);
+      const minY = Math.min(anchorContentY, currentY);
+      const maxY = Math.max(anchorContentY, currentY);
+
+      setMarqueeBox({
+        left: minX,
+        top: minY,
+        width: Math.max(1, maxX - minX),
+        height: Math.max(1, maxY - minY),
+      });
+
+      const clipElements = container.querySelectorAll<HTMLElement>('[data-clip-id]');
+      const intersectedIds = new Set<string>();
+
+      clipElements.forEach((el) => {
+        const clipRect = el.getBoundingClientRect();
+        const clipX1 = clipRect.left - cRect.left + scrollLeft;
+        const clipX2 = clipX1 + clipRect.width;
+        const clipY1 = clipRect.top - cRect.top + scrollTop;
+        const clipY2 = clipY1 + clipRect.height;
+
+        if (minX <= clipX2 && maxX >= clipX1 && minY <= clipY2 && maxY >= clipY1) {
+          const id = el.getAttribute('data-clip-id');
+          if (id) intersectedIds.add(id);
+        }
+      });
+
+      const finalSelection = isModifier
+        ? Array.from(new Set([...initialSelectedIds, ...intersectedIds]))
+        : Array.from(intersectedIds);
+
+      if (
+        finalSelection.length !== lastSelection.length ||
+        finalSelection.some((id, idx) => id !== lastSelection[idx])
+      ) {
+        lastSelection = finalSelection;
+        useProjectStore.getState().setSelectedClipIds(finalSelection);
+      }
+    };
+
+    const onMouseMove = (moveEvt: MouseEvent) => {
+      lastClientX = moveEvt.clientX;
+      lastClientY = moveEvt.clientY;
+
+      if (!isMarquee) {
+        const dist = Math.hypot(moveEvt.clientX - startClientX, moveEvt.clientY - startClientY);
+        if (dist >= 4) {
+          isMarquee = true;
+          performAutoScroll();
+        }
+      }
+
+      if (isMarquee) {
+        scheduleFrame();
+      }
+    };
+
+    const onMouseUp = (upEvt: MouseEvent) => {
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+      stopAutoScroll();
+      if (marqueeRaf !== null) {
+        cancelAnimationFrame(marqueeRaf);
+        marqueeRaf = null;
+      }
+      setMarqueeBox(null);
+
+      if (!isMarquee) {
+        if (!isModifier) {
+          useProjectStore.getState().clearClipSelection();
+          setPlayheadTime(convertClientXToSeconds(upEvt.clientX));
+        }
+      }
+    };
+
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+  };
+
+  // Dragging a Clip body (supports multi-clip drag)
   const handleClipDragStart = (e: React.MouseEvent, clip: TimelineClip) => {
     e.stopPropagation();
     if (e.button !== 0) return;
     setContextMenu(null);
-    selectClip(clip.id);
+
+    const isModifier = e.shiftKey || e.ctrlKey || e.metaKey;
+    const isAlreadySelected = selectedClipIds.includes(clip.id);
+
+    if (isModifier) {
+      selectClip(clip.id, 'toggle');
+      return;
+    }
+
+    if (!isAlreadySelected) {
+      selectClip(clip.id, 'replace');
+    } else {
+      setSelectedClipIds(selectedClipIds, clip.id);
+    }
 
     const track = currentProject.tracks.find((t) => t.id === clip.trackId);
     if (track?.locked) return;
 
     pushUndoSnapshot();
     const startMouseX = e.clientX;
+    const startMouseY = e.clientY;
     const initialStartTime = clip.startTime;
     let moved = false;
+    let lastNextStart = clip.startTime;
+    let pendingNewTrack: DropTarget | null = null;
+
+    // Capture state for multi-clip moving
+    const stClips = useProjectStore.getState().currentProject?.clips || [];
+    const activeSelectedIds = useProjectStore.getState().selectedClipIds;
+    const effectiveSelection = activeSelectedIds.includes(clip.id)
+      ? activeSelectedIds
+      : [clip.id];
+
+    // Find minStartTime across all selected clips and their linked peers
+    const linkedGroupIds = new Set<string>();
+    stClips.forEach((c) => {
+      if (effectiveSelection.includes(c.id) && c.linkGroupId) {
+        linkedGroupIds.add(c.linkGroupId);
+      }
+    });
+    const clipsToMove = stClips.filter(
+      (c) => effectiveSelection.includes(c.id) || (c.linkGroupId && linkedGroupIds.has(c.linkGroupId))
+    );
+    const initialStarts: Record<string, number> = {};
+    clipsToMove.forEach((c) => {
+      initialStarts[c.id] = c.startTime;
+    });
+    const minStart = clipsToMove.length > 0 ? Math.min(...clipsToMove.map((c) => c.startTime)) : 0;
 
     const onMouseMove = (moveEvt: MouseEvent) => {
-      moved = true;
+      const dist = Math.hypot(moveEvt.clientX - startMouseX, moveEvt.clientY - startMouseY);
+      if (dist > 3) {
+        moved = true;
+      }
+      if (!moved) return;
+
       const deltaPx = moveEvt.clientX - startMouseX;
       const deltaSec = deltaPx / timelineZoom;
-      const nextStart = Math.max(0, initialStartTime + deltaSec);
+      const clampedDelta = Math.max(-minStart, deltaSec);
+      const nextStart = Math.max(0, initialStartTime + clampedDelta);
+      lastNextStart = nextStart;
 
-      const elUnderMouse = document.elementFromPoint(moveEvt.clientX, moveEvt.clientY);
-      const trackRowEl = elUnderMouse?.closest('[data-track-id]') as HTMLElement | null;
-      const hoveredTrackId = trackRowEl?.getAttribute('data-track-id') || undefined;
+      // Only allow new track insertion if dragging a single clip
+      pendingNewTrack = null;
+      if (effectiveSelection.length === 1 && Math.abs(moveEvt.clientY - startMouseY) > 8) {
+        const st = useProjectStore.getState();
+        const proj = st.currentProject;
+        if (proj) {
+          pendingNewTrack = computeDropTarget({
+            clientX: moveEvt.clientX,
+            clientY: moveEvt.clientY,
+            tracks: proj.tracks,
+            clips: proj.clips,
+            mediaType: clip.type,
+            duration: clip.duration,
+            zoom: timelineZoom,
+            isMagnetic: st.isMainTrackMagnetic,
+            ignoreClipId: clip.id,
+            edgeOnly: true,
+            sourceTrackId: clip.trackId,
+          });
+        }
+      }
+      useProjectStore.getState().setDropIndicator(pendingNewTrack ? pendingNewTrack.indicator : null);
 
-      moveClipLive(clip.id, nextStart, hoveredTrackId);
+      let hoveredTrackId: string | undefined;
+      if (!pendingNewTrack) {
+        const elUnderMouse = document.elementFromPoint(moveEvt.clientX, moveEvt.clientY);
+        const trackRowEl = elUnderMouse?.closest('[data-track-id]') as HTMLElement | null;
+        hoveredTrackId = trackRowEl?.getAttribute('data-track-id') || undefined;
+      }
+
+      moveSelectedClipsLive(initialStarts, clampedDelta, clip.id, hoveredTrackId);
     };
 
     const onMouseUp = () => {
       window.removeEventListener('mousemove', onMouseMove);
       window.removeEventListener('mouseup', onMouseUp);
+      const target = pendingNewTrack as DropTarget | null;
+      useProjectStore.getState().setDropIndicator(null);
       if (moved) {
+        if (target && typeof target.commit.insertAtIndex === 'number') {
+          moveClipToNewTrack(clip.id, lastNextStart, target.commit.insertAtIndex);
+        }
         persistCurrentProject();
+      } else {
+        if (isAlreadySelected && effectiveSelection.length > 1) {
+          selectClip(clip.id, 'replace');
+        }
       }
     };
 
@@ -388,7 +696,11 @@ export const TimelinePanel: React.FC<{ heightPx?: number }> = ({ heightPx = 270 
   const handleClipContextMenu = (e: React.MouseEvent, clip: TimelineClip) => {
     e.preventDefault();
     e.stopPropagation();
-    selectClip(clip.id);
+
+    const activeSelectedIds = useProjectStore.getState().selectedClipIds;
+    if (!activeSelectedIds.includes(clip.id)) {
+      selectClip(clip.id, 'replace');
+    }
 
     const menuW = 260;
     const menuH = 290;
@@ -442,12 +754,21 @@ export const TimelinePanel: React.FC<{ heightPx?: number }> = ({ heightPx = 270 
 
           <button
             type="button"
-            disabled={!selectedClip}
-            onClick={() => selectedClip && removeClip(selectedClip.id)}
-            title="Eliminar (Tecla De Retroceso)"
-            className="p-1.5 rounded-lg text-gray-200 hover:bg-white/10 hover:text-rose-400 disabled:opacity-30 transition"
+            disabled={!selectedClip && selectedClipIds.length === 0}
+            onClick={() => removeClip()}
+            title={
+              selectedClipIds.length > 1
+                ? `Eliminar (${selectedClipIds.length} clips seleccionados - Tecla Supr / Retroceso)`
+                : 'Eliminar clip (Tecla Supr / Retroceso)'
+            }
+            className="p-1.5 rounded-lg text-gray-200 hover:bg-white/10 hover:text-rose-400 disabled:opacity-30 transition relative"
           >
             <Trash2 className="w-4 h-4" />
+            {selectedClipIds.length > 1 && (
+              <span className="absolute -top-1 -right-1 px-1 min-w-[14px] h-[14px] rounded-full bg-rose-500 text-[9px] font-bold text-white flex items-center justify-center leading-none shadow">
+                {selectedClipIds.length}
+              </span>
+            )}
           </button>
 
           {/* Contextual tools that appear when a clip is selected */}
@@ -481,11 +802,20 @@ export const TimelinePanel: React.FC<{ heightPx?: number }> = ({ heightPx = 270 
 
               <button
                 type="button"
-                onClick={() => duplicateClip(selectedClip.id)}
-                title="Duplicar clip (Ctrl+D)"
-                className="p-1.5 rounded-lg text-gray-200 hover:bg-white/10 transition"
+                onClick={() => duplicateClip()}
+                title={
+                  selectedClipIds.length > 1
+                    ? `Duplicar (${selectedClipIds.length} clips seleccionados - Ctrl+D)`
+                    : 'Duplicar clip (Ctrl+D)'
+                }
+                className="p-1.5 rounded-lg text-gray-200 hover:bg-white/10 transition relative"
               >
                 <Copy className="w-4 h-4" />
+                {selectedClipIds.length > 1 && (
+                  <span className="absolute -top-1 -right-1 px-1 min-w-[14px] h-[14px] rounded-full bg-[#00d4e5] text-[9px] font-bold text-[#141517] flex items-center justify-center leading-none shadow">
+                    {selectedClipIds.length}
+                  </span>
+                )}
               </button>
 
               <button
@@ -681,7 +1011,8 @@ export const TimelinePanel: React.FC<{ heightPx?: number }> = ({ heightPx = 270 
         /* Expanded Multi-Track Timeline Area */
         <div
           ref={timelineScrollRef}
-          onClick={() => selectClip(null)}
+          data-timeline-scroll
+          onMouseDown={handleTimelineMouseDown}
           className="flex-1 overflow-auto relative bg-[#141517]"
         >
           <div
@@ -690,11 +1021,31 @@ export const TimelinePanel: React.FC<{ heightPx?: number }> = ({ heightPx = 270 
               width: isEmptyProject ? '100%' : `${TRACK_HEADER_WIDTH + timelineWidthPx}px`,
             }}
           >
+            {/* Rubber-band Marquee Selection Box */}
+            {marqueeBox && (
+              <div
+                style={{
+                  position: 'absolute',
+                  left: `${marqueeBox.left}px`,
+                  top: `${marqueeBox.top}px`,
+                  width: `${marqueeBox.width}px`,
+                  height: `${marqueeBox.height}px`,
+                  pointerEvents: 'none',
+                  zIndex: 45,
+                }}
+                className="bg-[#00d4e5]/15 border border-[#00d4e5] rounded pointer-events-none"
+              />
+            )}
+
             {/* Top Time Ruler */}
-            <div className="sticky top-0 z-20 h-7 bg-[#141517] border-b border-[#222328] flex items-center shrink-0">
+            <div
+              data-timeline-ruler="true"
+              style={{ transform: 'translateZ(0)' }}
+              className="sticky top-0 z-[35] h-7 bg-[#141517] border-b border-[#222328] flex items-center shrink-0 isolate"
+            >
               <div
                 style={{ width: `${isEmptyProject ? 24 : TRACK_HEADER_WIDTH}px` }}
-                className="sticky left-0 z-30 h-full bg-[#141517] shrink-0"
+                className="sticky left-0 z-[40] h-full bg-[#141517] shrink-0"
               />
 
               <div
@@ -805,9 +1156,10 @@ export const TimelinePanel: React.FC<{ heightPx?: number }> = ({ heightPx = 270 
                     >
                       {/* Minimalist Left Track Icon Header */}
                       <div
+                        data-track-header="true"
                         style={{ width: `${TRACK_HEADER_WIDTH}px` }}
                         onClick={(e) => e.stopPropagation()}
-                        className="sticky left-0 z-20 h-full bg-[#141517] px-2.5 flex items-center justify-between shrink-0"
+                        className="sticky left-0 z-30 h-full bg-[#141517] px-2.5 flex items-center justify-between shrink-0"
                       >
                         <div className="flex items-center gap-1">
                           {track.type !== 'text' && (
@@ -869,27 +1221,27 @@ export const TimelinePanel: React.FC<{ heightPx?: number }> = ({ heightPx = 270 
 
                       {/* Track Lane Container */}
                       <div
-                        onMouseDown={(e) => {
-                          if (e.target === e.currentTarget) {
-                            setPlayheadTime(convertClientXToSeconds(e.clientX));
-                          }
-                        }}
+                        data-track-lane="true"
                         className="relative flex-1 h-full rounded-lg bg-[#202124]/85 mr-4"
                       >
                         {/* Clips in this Track */}
                         {trackClips.map((clip) => {
                           const leftPx = clip.startTime * timelineZoom;
                           const widthPx = Math.max(20, clip.duration * timelineZoom);
-                          const isSelected = selectedClipId === clip.id;
+                          const isMultiSelected = selectedClipIds.includes(clip.id);
+                          const isPrimarySelected = selectedClipId === clip.id;
+                          const isSelected = isMultiSelected || isPrimarySelected;
                           const isLinkedPeer =
+                            !isSelected &&
                             selectedClip?.linkGroupId &&
-                            clip.linkGroupId === selectedClip.linkGroupId &&
-                            clip.id !== selectedClip.id;
+                            clip.linkGroupId === selectedClip.linkGroupId;
                           const asset = currentProject.assets.find((a) => a.id === clip.assetId);
 
                           return (
                             <div
                               key={clip.id}
+                              data-clip-id={clip.id}
+                              title={`${clip.type === 'text' && clip.textConfig ? clip.textConfig.content : clip.name} · ${formatTimecode(clip.duration, currentProject.fps)}`}
                               onClick={(e) => e.stopPropagation()}
                               onMouseDown={(e) => handleClipDragStart(e, clip)}
                               onContextMenu={(e) => handleClipContextMenu(e, clip)}
@@ -909,21 +1261,32 @@ export const TimelinePanel: React.FC<{ heightPx?: number }> = ({ heightPx = 270 
                                   ? 'ring-2 ring-[#00d4e5] border border-[#00d4e5] z-20 shadow-lg shadow-[#00d4e5]/20'
                                   : isLinkedPeer
                                   ? 'ring-1 ring-[#00d4e5]/70 border border-[#00d4e5]/70 z-10'
-                                  : 'border border-white/10 hover:border-white/30'
+                                  : `border hover:brightness-125 ${
+                                      clip.type === 'audio'
+                                        ? 'border-emerald-400/30'
+                                        : clip.type === 'image'
+                                        ? 'border-violet-400/35'
+                                        : clip.type === 'text'
+                                        ? 'border-pink-300/30'
+                                        : 'border-blue-400/35'
+                                    }`
                               } ${
                                 clip.type === 'text'
                                   ? 'bg-[#d6457a]'
                                   : clip.type === 'audio'
-                                  ? 'bg-[#123842]'
-                                  : 'bg-[#174856]'
+                                  ? 'bg-[#10382b]'
+                                  : clip.type === 'image'
+                                  ? 'bg-[#32265e]'
+                                  : 'bg-[#1b3a73]'
                               }`}
                             >
                               {clip.type === 'video' && asset?.thumbnail && (
-                                <div className="absolute inset-0 bg-[#0d2b36]/35 pointer-events-none" />
+                                <div className="absolute inset-0 bg-[#0b1b3a]/35 pointer-events-none" />
                               )}
 
                               {/* Left Trim Handle (`|`) */}
                               <div
+                                data-trim-handle="true"
                                 onMouseDown={(e) => handleClipTrimStart(e, clip, 'left')}
                                 title="Arrastrar para recortar inicio"
                                 className={`absolute left-0 top-0 bottom-0 w-2.5 cursor-ew-resize z-20 flex items-center justify-center transition ${
@@ -937,6 +1300,7 @@ export const TimelinePanel: React.FC<{ heightPx?: number }> = ({ heightPx = 270 
 
                               {/* Right Trim Handle (`|`) */}
                               <div
+                                data-trim-handle="true"
                                 onMouseDown={(e) => handleClipTrimStart(e, clip, 'right')}
                                 title="Arrastrar para recortar final"
                                 className={`absolute right-0 top-0 bottom-0 w-2.5 cursor-ew-resize z-20 flex items-center justify-center transition ${
@@ -948,9 +1312,26 @@ export const TimelinePanel: React.FC<{ heightPx?: number }> = ({ heightPx = 270 
                                 <div className="w-[2px] h-3.5 bg-current rounded-full" />
                               </div>
 
-                              {/* Píldora de identificación de clip (`fiss.mp4  00:13:25`) */}
-                              <div className="px-2.5 pt-1 flex items-center gap-1.5 z-10 pointer-events-none">
-                                <div className="inline-flex items-center gap-1.5 px-1.5 py-0.5 rounded bg-black/55 backdrop-blur-xs text-[10px] text-white font-medium max-w-full truncate">
+                              {/* Ícono de tipo (siempre visible) + etiqueta (solo hover, selección o texto) */}
+                              <div className="px-2.5 pt-1 flex items-center gap-1 z-10 pointer-events-none min-w-0">
+                                <div className="shrink-0 w-4 h-4 rounded bg-black/55 flex items-center justify-center text-white/90">
+                                  {clip.type === 'video' ? (
+                                    <Film className="w-2.5 h-2.5" />
+                                  ) : clip.type === 'audio' ? (
+                                    <Music className="w-2.5 h-2.5" />
+                                  ) : clip.type === 'image' ? (
+                                    <ImageIcon className="w-2.5 h-2.5" />
+                                  ) : (
+                                    <TypeIcon className="w-2.5 h-2.5" />
+                                  )}
+                                </div>
+                                <div
+                                  className={`inline-flex items-center gap-1.5 px-1.5 py-0.5 rounded bg-black/55 text-[10px] text-white font-medium min-w-0 transition-opacity duration-150 ${
+                                    isSelected || clip.type === 'text'
+                                      ? 'opacity-100'
+                                      : 'opacity-0 group-hover:opacity-100'
+                                  }`}
+                                >
                                   {clip.linkGroupId && (
                                     <Link2 className="w-2.5 h-2.5 text-[#00d4e5] shrink-0" />
                                   )}
@@ -965,17 +1346,48 @@ export const TimelinePanel: React.FC<{ heightPx?: number }> = ({ heightPx = 270 
                                 </div>
                               </div>
 
-                              {/* Waveform inside Audio Clip */}
-                              {asset?.waveform && asset.waveform.length > 0 && clip.type === 'audio' && (
-                                <div className="px-2 pb-1 h-4 flex items-end gap-[1px] opacity-85 pointer-events-none z-10">
-                                  {asset.waveform.slice(0, 60).map((peak, i) => (
-                                    <div
-                                      key={i}
-                                      style={{ height: `${Math.max(15, Math.round(peak * 100))}%` }}
-                                      className="flex-1 rounded-full bg-[#00d4e5]"
-                                    />
-                                  ))}
+                              {/* High-Definition Audio Waveform inside Audio Clip */}
+                              {clip.type === 'audio' && (
+                                <div className="absolute left-0 right-0 bottom-1 top-4 pointer-events-none z-0 flex items-center overflow-hidden">
+                                  <AudioWaveformCanvas
+                                    waveform={asset?.waveform}
+                                    assetDuration={asset?.duration || clip.duration}
+                                    sourceStart={clip.sourceStart || 0}
+                                    clipDuration={clip.duration}
+                                    width={Math.max(10, widthPx)}
+                                    height={28}
+                                    color="#10b981"
+                                    secondaryColor="#059669"
+                                    mirrored={true}
+                                    className="w-full h-full opacity-90"
+                                  />
                                 </div>
+                              )}
+
+                              {/* Volume Rubber-Band Envelope (Curva interactiva de volumen montada en la forma de onda) */}
+                              {clip.type === 'audio' && (
+                                <div className="absolute left-0 right-0 bottom-1 top-4 z-10 overflow-visible pointer-events-none">
+                                  <VolumeRubberBand
+                                    clip={clip}
+                                    widthPx={widthPx}
+                                    heightPx={28}
+                                    timelineZoom={timelineZoom}
+                                    playheadTime={playheadTime}
+                                    onSeek={(t) => setPlayheadTime(t)}
+                                    onSelectClip={(id) => selectClip(id)}
+                                  />
+                                </div>
+                              )}
+
+                              {/* Timeline Keyframe Markers Strip (Rombos ◆ en el cuerpo del clip para video/imagen/texto) */}
+                              {clip.type !== 'audio' && (
+                                <ClipKeyframeMarkers
+                                  clip={clip}
+                                  timelineZoom={timelineZoom}
+                                  playheadTime={playheadTime}
+                                  onSeek={(t) => setPlayheadTime(t)}
+                                  onSelectClip={(id) => selectClip(id)}
+                                />
                               )}
                             </div>
                           );
@@ -999,7 +1411,7 @@ export const TimelinePanel: React.FC<{ heightPx?: number }> = ({ heightPx = 270 
                                 left: `${leftPx}px`,
                                 width: `${widthPx}px`,
                               }}
-                              className={`absolute top-0.5 bottom-0.5 z-30 rounded-md border cursor-pointer flex items-center justify-center overflow-hidden transition ${
+                              className={`absolute top-0.5 bottom-0.5 z-[25] rounded-md border cursor-pointer flex items-center justify-center overflow-hidden transition ${
                                 isOvSelected
                                   ? 'border-[#00d4e5] bg-[#00d4e5]/25'
                                   : 'border-amber-400/80 bg-amber-500/15 hover:bg-amber-400/25'
@@ -1040,7 +1452,7 @@ export const TimelinePanel: React.FC<{ heightPx?: number }> = ({ heightPx = 270 
             {!isEmptyProject && (
               <div
                 style={{ left: `${TRACK_HEADER_WIDTH + playheadTime * timelineZoom}px` }}
-                className="absolute top-0 bottom-0 w-[1.5px] bg-white z-40 pointer-events-none"
+                className="absolute top-0 bottom-0 w-[1.5px] bg-white z-[45] pointer-events-none"
               >
                 <div className="w-2.5 h-3.5 -ml-[4px] rounded-[3px] bg-[#141517] border-[1.5px] border-white shadow" />
               </div>
@@ -1084,7 +1496,9 @@ export const TimelinePanel: React.FC<{ heightPx?: number }> = ({ heightPx = 270 
           >
             <span className="flex items-center gap-2.5">
               <Copy className="w-3.5 h-3.5 text-gray-300" />
-              Copia
+              {selectedClipIds.length > 1
+                ? `Copiar (${selectedClipIds.length} clips)`
+                : 'Copiar'}
             </span>
             <span className="flex items-center gap-1 text-[10px] font-mono text-gray-400">
               <kbd className="px-1.5 py-0.5 rounded bg-[#2c2d32]">Ctrl</kbd>
@@ -1102,7 +1516,9 @@ export const TimelinePanel: React.FC<{ heightPx?: number }> = ({ heightPx = 270 
           >
             <span className="flex items-center gap-2.5">
               <Scissors className="w-3.5 h-3.5 text-gray-300" />
-              Cortar
+              {selectedClipIds.length > 1
+                ? `Cortar (${selectedClipIds.length} clips)`
+                : 'Cortar'}
             </span>
             <span className="flex items-center gap-1 text-[10px] font-mono text-gray-400">
               <kbd className="px-1.5 py-0.5 rounded bg-[#2c2d32]">Ctrl</kbd>
@@ -1132,14 +1548,16 @@ export const TimelinePanel: React.FC<{ heightPx?: number }> = ({ heightPx = 270 
           <button
             type="button"
             onClick={() => {
-              duplicateClip(contextClip.id);
+              duplicateClip();
               setContextMenu(null);
             }}
             className="w-full px-3.5 py-2 hover:bg-white/10 flex items-center justify-between transition"
           >
             <span className="flex items-center gap-2.5">
               <Copy className="w-3.5 h-3.5 text-gray-300" />
-              Duplicar
+              {selectedClipIds.length > 1
+                ? `Duplicar (${selectedClipIds.length} clips)`
+                : 'Duplicar'}
             </span>
             <span className="flex items-center gap-1 text-[10px] font-mono text-gray-400">
               <kbd className="px-1.5 py-0.5 rounded bg-[#2c2d32]">Ctrl</kbd>
@@ -1150,17 +1568,19 @@ export const TimelinePanel: React.FC<{ heightPx?: number }> = ({ heightPx = 270 
           <button
             type="button"
             onClick={() => {
-              removeClip(contextClip.id);
+              removeClip();
               setContextMenu(null);
             }}
             className="w-full px-3.5 py-2 hover:bg-rose-500/15 text-rose-300 flex items-center justify-between transition"
           >
             <span className="flex items-center gap-2.5">
               <Trash2 className="w-3.5 h-3.5" />
-              Eliminar
+              {selectedClipIds.length > 1
+                ? `Eliminar (${selectedClipIds.length} clips)`
+                : 'Eliminar'}
             </span>
             <kbd className="px-1.5 py-0.5 rounded bg-[#2c2d32] text-[10px] font-mono text-gray-400">
-              Tecla De Retroceso
+              Supr / Backspace
             </kbd>
           </button>
 

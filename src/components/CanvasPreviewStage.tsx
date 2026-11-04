@@ -10,6 +10,7 @@ import { useProjectStore } from '../store/useProjectStore';
 import { apiUrl } from '../config/api';
 import { computeTrackOverlaps } from './TimelinePanel';
 import type { AspectRatio, MediaAsset, ProjectData, TimelineClip } from '../types/project';
+import { evaluatePropertyAtTime } from '../lib/keyframeEngine';
 
 export function getResolutionForRatio(
   ratio: AspectRatio,
@@ -62,9 +63,24 @@ export function drawSingleClipToContext(
   mediaSource: CanvasDrawableSource | undefined,
   extraAlpha = 1,
   extraOffsetX = 0,
-  extraScale = 1
+  extraScale = 1,
+  currentTime?: number
 ): ClipVisualBox | null {
-  const tf = clip.transform || { x: 0, y: 0, scale: 1, rotation: 0, opacity: 1, flipX: false };
+  const baseTf = clip.transform || { x: 0, y: 0, scale: 1, rotation: 0, opacity: 1, flipX: false };
+  const timeOffset =
+    currentTime !== undefined
+      ? Math.max(0, Math.min(clip.duration, currentTime - clip.startTime))
+      : 0;
+
+  const tf = {
+    x: evaluatePropertyAtTime(clip.keyframes?.x, baseTf.x, timeOffset),
+    y: evaluatePropertyAtTime(clip.keyframes?.y, baseTf.y, timeOffset),
+    scale: evaluatePropertyAtTime(clip.keyframes?.scale, baseTf.scale, timeOffset),
+    rotation: evaluatePropertyAtTime(clip.keyframes?.rotation, baseTf.rotation, timeOffset),
+    opacity: evaluatePropertyAtTime(clip.keyframes?.opacity, baseTf.opacity, timeOffset),
+    flipX: baseTf.flipX,
+  };
+
   const finalAlpha = Math.max(0, Math.min(1, tf.opacity * extraAlpha));
   if (finalAlpha <= 0.005) return null;
 
@@ -249,22 +265,22 @@ export function renderProjectFrameToCanvas(
       const srcB = mediaElements.get(clipB.id);
 
       if (transition === 'crossfade') {
-        const b1 = drawSingleClipToContext(ctx, canvasWidth, canvasHeight, clipA, srcA, 1 - p);
-        const b2 = drawSingleClipToContext(ctx, canvasWidth, canvasHeight, clipB, srcB, p);
+        const b1 = drawSingleClipToContext(ctx, canvasWidth, canvasHeight, clipA, srcA, 1 - p, 0, 1, time);
+        const b2 = drawSingleClipToContext(ctx, canvasWidth, canvasHeight, clipB, srcB, p, 0, 1, time);
         if (b1) drawnBoxes.push(b1);
         if (b2) drawnBoxes.push(b2);
       } else if (transition === 'fade-black') {
         if (p < 0.5) {
           const alphaA = 1 - p * 2;
-          const b1 = drawSingleClipToContext(ctx, canvasWidth, canvasHeight, clipA, srcA, alphaA);
+          const b1 = drawSingleClipToContext(ctx, canvasWidth, canvasHeight, clipA, srcA, alphaA, 0, 1, time);
           if (b1) drawnBoxes.push(b1);
         } else {
           const alphaB = (p - 0.5) * 2;
-          const b2 = drawSingleClipToContext(ctx, canvasWidth, canvasHeight, clipB, srcB, alphaB);
+          const b2 = drawSingleClipToContext(ctx, canvasWidth, canvasHeight, clipB, srcB, alphaB, 0, 1, time);
           if (b2) drawnBoxes.push(b2);
         }
       } else if (transition === 'wipe-left' || transition === 'wipe-right') {
-        const b1 = drawSingleClipToContext(ctx, canvasWidth, canvasHeight, clipA, srcA, 1);
+        const b1 = drawSingleClipToContext(ctx, canvasWidth, canvasHeight, clipA, srcA, 1, 0, 1, time);
         if (b1) drawnBoxes.push(b1);
 
         ctx.save();
@@ -275,7 +291,7 @@ export function renderProjectFrameToCanvas(
           ctx.rect(0, 0, canvasWidth * p, canvasHeight);
         }
         ctx.clip();
-        const b2 = drawSingleClipToContext(ctx, canvasWidth, canvasHeight, clipB, srcB, 1);
+        const b2 = drawSingleClipToContext(ctx, canvasWidth, canvasHeight, clipB, srcB, 1, 0, 1, time);
         ctx.restore();
         if (b2) drawnBoxes.push(b2);
       } else if (transition === 'slide-left') {
@@ -286,7 +302,9 @@ export function renderProjectFrameToCanvas(
           clipA,
           srcA,
           1,
-          -p * canvasWidth
+          -p * canvasWidth,
+          1,
+          time
         );
         const b2 = drawSingleClipToContext(
           ctx,
@@ -295,7 +313,9 @@ export function renderProjectFrameToCanvas(
           clipB,
           srcB,
           1,
-          (1 - p) * canvasWidth
+          (1 - p) * canvasWidth,
+          1,
+          time
         );
         if (b1) drawnBoxes.push(b1);
         if (b2) drawnBoxes.push(b2);
@@ -308,7 +328,8 @@ export function renderProjectFrameToCanvas(
           srcA,
           1 - p,
           0,
-          1 + p * 0.45
+          1 + p * 0.45,
+          time
         );
         const b2 = drawSingleClipToContext(
           ctx,
@@ -318,7 +339,8 @@ export function renderProjectFrameToCanvas(
           srcB,
           p,
           0,
-          0.65 + p * 0.35
+          0.65 + p * 0.35,
+          time
         );
         if (b1) drawnBoxes.push(b1);
         if (b2) drawnBoxes.push(b2);
@@ -333,7 +355,10 @@ export function renderProjectFrameToCanvas(
           canvasHeight,
           clip,
           src,
-          fadeAlpha
+          fadeAlpha,
+          0,
+          1,
+          time
         );
         if (box) drawnBoxes.push(box);
       }
@@ -523,7 +548,9 @@ export const CanvasPreviewStage: React.FC = () => {
           }
 
           const fadeFactor = computeClipIndividualFadeAlpha(clip, playheadTime);
-          aud.volume = Math.max(0, Math.min(1, clip.volume * fadeFactor * ovFactor));
+          const timeOffset = Math.max(0, Math.min(clip.duration, playheadTime - clip.startTime));
+          const baseVol = evaluatePropertyAtTime(clip.keyframes?.volume, clip.volume, timeOffset);
+          aud.volume = Math.max(0, Math.min(1, baseVol * fadeFactor * ovFactor));
 
           if (Math.abs(aud.currentTime - targetMediaTime) > (isPlaying ? 0.28 : 0.06)) {
             aud.currentTime = targetMediaTime;
@@ -616,8 +643,9 @@ export const CanvasPreviewStage: React.FC = () => {
 
     const startMouseX = e.clientX;
     const startMouseY = e.clientY;
-    const initX = clip.transform.x;
-    const initY = clip.transform.y;
+    const timeOffset = Math.max(0, Math.min(clip.duration, playheadTime - clip.startTime));
+    const initX = evaluatePropertyAtTime(clip.keyframes?.x, clip.transform.x, timeOffset);
+    const initY = evaluatePropertyAtTime(clip.keyframes?.y, clip.transform.y, timeOffset);
 
     const onMouseMove = (moveEvt: MouseEvent) => {
       const dx = (moveEvt.clientX - startMouseX) * coordRatioX;
@@ -660,7 +688,8 @@ export const CanvasPreviewStage: React.FC = () => {
     pushUndoSnapshot();
 
     const startMouseY = e.clientY;
-    const initScale = clip.transform.scale;
+    const timeOffset = Math.max(0, Math.min(clip.duration, playheadTime - clip.startTime));
+    const initScale = evaluatePropertyAtTime(clip.keyframes?.scale, clip.transform.scale, timeOffset);
 
     const onMouseMove = (moveEvt: MouseEvent) => {
       const dy = startMouseY - moveEvt.clientY;
@@ -730,6 +759,7 @@ export const CanvasPreviewStage: React.FC = () => {
   return (
     <div
       ref={wrapperRef}
+      data-preview-stage
       onMouseDown={(e) => {
         if (e.button === 0) {
           selectClip(null);

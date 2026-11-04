@@ -2,6 +2,25 @@ export type AspectRatio = '16:9' | '9:16' | '1:1';
 export type TrackType = 'video' | 'audio' | 'text';
 export type TransitionType = 'crossfade' | 'fade-black' | 'wipe-left' | 'wipe-right' | 'slide-left' | 'zoom';
 
+export type InterpolationType = 'linear' | 'ease-in-out' | 'ease-in' | 'ease-out' | 'hold';
+
+export type AnimatableProperty =
+  | 'x'
+  | 'y'
+  | 'scale'
+  | 'rotation'
+  | 'opacity'
+  | 'volume';
+
+export interface Keyframe {
+  id: string;
+  timeOffset: number; // Segundos relativos al clip (0 <= timeOffset <= clip.duration)
+  value: number;      // Valor numérico de la propiedad en ese instante
+  interpolation?: InterpolationType; // 'linear' por defecto
+}
+
+export type ClipKeyframes = Partial<Record<AnimatableProperty, Keyframe[]>>;
+
 export interface MediaAsset {
   id: string;
   name: string;
@@ -72,6 +91,7 @@ export interface TimelineClip {
   overlapTransition: TransitionType;
 
   textConfig?: TextConfig;
+  keyframes?: ClipKeyframes;
 }
 
 export interface ProjectData {

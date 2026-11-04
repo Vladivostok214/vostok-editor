@@ -43,6 +43,11 @@ Este documento sirve como la fuente única de verdad (*Single Source of Truth*) 
   * **Inspección y Ondas (`/api/media/probe`):** Extrae duración, dimensiones, presencia de pista de audio, miniatura en base64 y picos de onda de audio (`waveform`).
   * **Pipeline de Exportación MP4 (`/api/export/start`, `/api/export/frames`, `/api/export/finalize`):** Recibe los fotogramas compuestos del Canvas, mezcla las pistas de audio activas con sus recortes (`atrim`), volúmenes, `afade` y desfases (`adelay`), codifica el `.mp4` (`libx264` + `aac`) en `~/.local/share/video-editor/exports/` y autolimpia los fotogramas temporales al terminar.
 
+### 2.3. Capa de Escritorio Nativa (Tauri v2 + Standalone Node Server + WebKitGTK)
+* **Tauri v2 ([`src-tauri/`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/src-tauri/)):** Empaqueta la aplicación como binario nativo de escritorio para Linux, utilizando WebKitGTK como motor de visualización con consumo mínimo de memoria RAM y arranque ultra rápido.
+* **Servidor Independiente ESM ([`server/standaloneServer.ts`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/server/standaloneServer.ts) $\rightarrow$ `dist-server/index.mjs`):** Empaquetado ultrarrápido con `esbuild` en formato ESM autónomo que levanta los servicios locales de streaming, probe y codificación FFmpeg tanto en modo desarrollo de escritorio (`npm run desktop:dev`) como en producción (`npm run desktop:build`).
+* **Arquitectura de Arrastre Universal ([`src/lib/timelineDrop.ts`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/src/lib/timelineDrop.ts)):** Abstracción matemática desacoplada de la API de Drag & Drop de HTML5 (la cual presenta inconsistencias en WebKitGTK), manejando eventos nativos de ratón con resolución precisa de destinos de pistas y solapamiento.
+
 ---
 
 ## 3. Funcionalidades y Reglas de UX Implementadas
@@ -69,6 +74,19 @@ Este documento sirve como la fuente única de verdad (*Single Source of Truth*) 
 
 ### 3.2. Biblioteca de Medios y Generador de Textos ([`src/components/EditorWorkspace.tsx`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/src/components/EditorWorkspace.tsx))
 * Importación mediante explorador local de Linux, arrastrar y soltar (*Drag & Drop*) y generador de pack de prueba con FFmpeg.
+* **Selección Múltiple y Recuadro Elástico (*Marquee Selection*):**
+  * Estado global `selectedAssetIds` en Zustand.
+  * Recuadro elástico por arrastre de ratón en zonas libres del cajón, con auto-scroll vertical y coordenadas de anclaje fijadas al contenido (`anchorContentY`).
+  * Modificadores de teclado: `Ctrl` / `Cmd` para alternar medios individuales y `Shift` para selección aditiva.
+  * Insignias visuales en tarjetas seleccionadas: anillo cian de 2px y checkmark `✓` en la esquina superior izquierda.
+  * Cabecera contextual con contador `X selecc.` y accesos rápidos de un clic: botón `+` para inserción en lote, papelera para borrado masivo y `✕` para deseleccionar.
+* **Arrastre Múltiple en Pila (*Multi-Asset Drag*) y Capa Fantasma ([`src/components/AssetDragLayer.tsx`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/src/components/AssetDragLayer.tsx)):**
+  * Al arrastrar cualquier medio seleccionado, se arrastra todo el conjunto simultáneamente.
+  * Previsualización fantasma en perspectiva (efecto baraja apilada) con ícono de capas, insignia `×N archivos` y duración acumulada total calculada en tiempo real.
+  * Indicador de destino punteado en la línea de tiempo dimensionado exactamente a la duración combinada de todos los medios arrastrados.
+* **Inserción Secuencial en Lote (`addAssetsToTimeline`):**
+  * Al soltar el paquete sobre el timeline, hacer doble clic o presionar `+`, los medios se insertan de forma consecutiva (`t0`, `t0 + d1`, `t0 + d1 + d2...`).
+  * Genera automáticamente las pistas de video, imagen y audio vinculadas necesarias, seleccionando de inmediato todos los clips recién colocados en la línea de tiempo.
 * **Flujo de Texto Minimalista y Profesional:**
   * **Opciones Directas de Tipografía:**
     * **"Título":** Inserta de inmediato un clip con `"TÍTULO"`, tipografía `TikTok Sans Variable`, tamaño `16` (equivalente a ~152px reales en 1080p), peso `800` (ExtraBold) y centrado en pantalla (`y: 0`).
@@ -87,6 +105,21 @@ Este documento sirve como la fuente única de verdad (*Single Source of Truth*) 
     * **Transformación Integrada:** Opacidad, escala, posición $(X, Y)$, rotación y volteo horizontal dentro del mismo panel sin salir a otras pestañas.
 
 ### 3.3. Línea de Tiempo Multipista y Asignación Inteligente de Pistas sin Colisión ([`src/components/TimelinePanel.tsx`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/src/components/TimelinePanel.tsx))
+* **Selección Múltiple y Recuadro Elástico (*Marquee Box*):**
+  * Arrastre con botón izquierdo en zonas vacías de la línea de tiempo para crear un recuadro de selección cian que selecciona todos los clips intersectados.
+  * Anclaje de coordenadas absoluto al contenido (`anchorContentX`, `anchorContentY`), manteniéndose invariante durante el auto-scroll horizontal y vertical.
+  * Modificadores de teclado: `Shift + Clic` o `Ctrl + Clic` para alternar clips individuales en la selección.
+* **Arrastre Sincronizado en Vivo (*Multi-Clip Dragging*):**
+  * Al mover cualquier clip del grupo seleccionado, todos los demás clips se desplazan en perfecta sincronía.
+  * Base inmutable `initialStarts` que erradica la acumulación exponencial de deltas (*compounding delta bug*).
+* **Operaciones en Lote y Badges Contadores:**
+  * Duplicación en bloque (`Ctrl+D`).
+  * Eliminación masiva con tecla `Supr` / `Backspace` (incluyendo clips vinculados y limpieza automática de pistas que queden vacías).
+  * Copiar, cortar y pegar múltiples clips (`Ctrl+C`, `Ctrl+X`, `Ctrl+V`) preservando los desfases relativos exactos entre ellos al pegarse en el cabezal.
+  * Insignias numéricas en la barra de herramientas: la papelera muestra badge rojo y el botón duplicar muestra badge cian con el conteo de clips seleccionados.
+  * Menú contextual dinámico (*"Eliminar (3 clips)"*, *"Duplicar (3 clips)"*).
+* **Corrección de Jerarquía de Capas en WebKitGTK (Tauri Linux):**
+  * Regla de tiempo sticky superior elevada a `z-[35]` con `isolate` y `transform: translateZ(0)` para asegurar que las pistas y clips nunca queden dibujados por encima de la barra de tiempo al hacer scroll vertical.
 * **Asignación Universal de Pistas sin Colisión (*Collision-Free Track Allocation*):**
   * Funciones [`isRangeCollidingWithTrack`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/src/store/useProjectStore.ts#L139) y [`findOrCreateAvailableTrack`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/src/store/useProjectStore.ts#L160) en el store central:
     * Al insertar texto, video, imagen o audio en un instante `startTime` con una duración dada, el editor verifica si la pista objetivo está ocupada en ese intervalo.
@@ -97,6 +130,7 @@ Este documento sirve como la fuente única de verdad (*Single Source of Truth*) 
 * **Protección de la Pista Principal Magnética ([`getMainVideoTrack`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/src/store/useProjectStore.ts#L131)):** Identifica siempre la pista base (`Pista Video 1`) para el empaquetado secuencial magnético sin afectar las pistas superiores de superposición.
 * **Vínculo Híbrido Video + Audio (`linkGroupId`):** Al arrastrar un video con sonido se crean las pistas de video y audio agrupadas. Pueden separarse o revincularse en cualquier momento con el botón **Separar/Vincular Audio**, clic derecho o `Ctrl+L`.
 * **Fundidos y Transiciones por Solapamiento:** Al arrastrar un Clip B sobre el final de un Clip A en la misma pista se crea automáticamente la zona de cruce `(X)` con selector de transición (*Crossfade*, *Dip to Black*, *Wipe Left/Right*, *Slide*, *Zoom*).
+* **Redimensionamiento Elástico de Medios Estáticos (Imágenes y Textos):** Los clips de imagen se insertan con una duración inicial estándar de 5 segundos pero no poseen límite artificial `maxDuration`. Al arrastrar sus manijas laterales (`|`), pueden estirarse o encogerse libremente en el timeline (hacia la derecha o hacia la izquierda) hasta un mínimo de seguridad de `0.4s` y un máximo de hasta 24 horas, con preservación de `sourceStart = 0` y compatibilidad nativa tanto en previsualización de Canvas como en exportación FFmpeg.
 * **Marcadores de Entrada (`I`) y Salida (`O`):**
   * Atajos `I` (Entrada), `O` (Salida) y `Alt+X` (Limpiar rango), además de banderines arrastrables en la regla de tiempo.
   * Acota tanto la reproducción como el rango de tiempo exportado en [`src/components/ExportModal.tsx`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/src/components/ExportModal.tsx).
@@ -110,9 +144,16 @@ Este documento sirve como la fuente única de verdad (*Single Source of Truth*) 
 * `I` / `O` / `Alt + X`: Marcar Entrada (In), Marcar Salida (Out) y Limpiar rango I/O.
 * `S` o `Ctrl + B`: Dividir (*Split*) clip en la posición de la aguja.
 * `Ctrl + L` (o clic derecho en clip): Separar / Vincular audio y video.
-* `Ctrl + C` / `Ctrl + X` / `Ctrl + V`: Copiar, Cortar y Pegar en la aguja.
-* `Supr` o `Backspace`: Eliminar clip seleccionado.
+* `Ctrl + C` / `Ctrl + X` / `Ctrl + V`: Copiar, Cortar y Pegar en la aguja (admite selección múltiple preservando desfases relativos).
+* `Ctrl + D`: Duplicar clip o lote de clips seleccionados.
+* `Ctrl + A`: Selección contextual (todos los medios si el cajón de biblioteca está activo; todos los clips si la línea de tiempo está activa).
+* `Supr` o `Backspace`: Eliminar clips seleccionados (o medios seleccionados de la biblioteca si no hay clips seleccionados).
+* `Shift + Clic` / `Ctrl + Clic`: Selección aditiva o alternada múltiple (tanto en timeline como en biblioteca).
+* `Esc`: Deseleccionar clips y medios, cerrar modales o salir de pantalla completa.
 * `Ctrl + Z` / `Ctrl + Y` (o `Ctrl + Shift + Z`): Deshacer y Rehacer.
+* `Ctrl + /`: Abrir / Cerrar cajón lateral izquierdo de medios.
+* `Ctrl + .`: Colapsar / Expandir pistas de la línea de tiempo.
+* `Ctrl + Rueda`: Zoom horizontal en la línea de tiempo centrado bajo el cursor.
 
 ---
 
@@ -124,6 +165,12 @@ Este documento sirve como la fuente única de verdad (*Single Source of Truth*) 
 - [x] **Fase 4:** Motor de Previsualización Canvas Unificado, Gizmo Interactivo, Paneles Redimensionables, Rango `I/O` y Exportación MP4. *(Completada)*
 - [x] **Fase 5:** Rediseño UX/UI Moderno y Minimalista (Estética Carbón/Cian, Pistas Dinámicas sin Pistas por Defecto, Paneles Colapsables y Flotantes, Menú Contextual de Clic Derecho y Modo Pantalla Completa). *(Completada)*
 - [x] **Fase 6:** Inspector Modular Contextual, Tipografía Variable Avanzada, Escala de Video (5-32) y Asignación de Pistas sin Colisiones. *(Completada)*
+- [x] **Fase 7:** Integración Nativa de Escritorio con Tauri v2 y Standalone Node Server para Linux. *(Completada)*
+- [x] **Fase 8:** Selección Múltiple y Operaciones en Lote en la Línea de Tiempo (Marquee Box, Arrastre Sincronizado y Z-Index WebKitGTK). *(Completada)*
+- [x] **Fase 9:** Selección Múltiple, Arrastre en Pila e Inserción Secuencial en la Biblioteca de Medios. *(Completada)*
+- [x] **Fase 10:** Optimización de Rendimiento y Renderizado Cero-Costo para WebKitGTK en Linux (RAF Throttling, Caché de Bounding Rects y Eliminación de Layout Thrashing). *(Completada)*
+- [x] **Fase 11:** Sistema Universal de Keyframes para Video y Audio (Ver especificación detallada en [`FASE_11.md`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/FASE_11.md)). *(Completada)*
+- [x] **Fase 12:** Visualización de Formas de Onda de Audio de Alta Definición en Línea de Tiempo (Ver especificación detallada en [`FASE_12.md`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/FASE_12.md)). *(Completada)*
 
 ---
 
@@ -225,3 +272,109 @@ Este documento sirve como la fuente única de verdad (*Single Source of Truth*) 
   * **Video / Imagen:** Si la pista de video base está ocupada, **crea una pista de video hacia arriba** para superposición, PiP o B-Roll.
   * **Audio:** Si la pista de audio está ocupada, **crea una pista de audio hacia abajo** para permitir la mezcla simultánea de música de fondo, locución y efectos de sonido.
 * **Preservación Magnética Base ([`getMainVideoTrack`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/src/store/useProjectStore.ts#L131)):** Identifica la pista `Pista Video 1` como eje principal de empaquetado magnético sin afectar las capas superiores de superposición.
+
+---
+
+## 7. Fase 7: Integración Nativa de Escritorio con Tauri v2 y Standalone Server
+
+* **Arquitectura Híbrida Tauri v2 + Node Standalone:**
+  * **Empaquetado Nativo (`src-tauri/`):** Configuración en Rust con Tauri v2 para compilar binarios nativos de escritorio para Linux (`.deb`, `.AppImage` o ejecutable binario).
+  * **Backend Independiente ([`server/standaloneServer.ts`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/server/standaloneServer.ts)):** Servidor Node empacado con `esbuild` en formato ESM (`dist-server/index.mjs`) que se ejecuta de forma autónoma con inicio instantáneo en menos de 15ms.
+  * **Comandos de ciclo de vida (`package.json`):**
+    * `npm run desktop:dev`: Compila el servidor independiente y levanta la ventana nativa de Tauri en modo desarrollo con Hot Module Replacement (HMR).
+    * `npm run desktop:build`: Empaqueta el servidor y construye el instalador nativo de Linux.
+* **Motor de Arrastre Universal ([`src/lib/timelineDrop.ts`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/src/lib/timelineDrop.ts)):**
+  * La API HTML5 Drag & Drop nativa presenta inconsistencias graves en WebKitGTK sobre Linux.
+  * Se diseñó un sistema desacoplado de arrastre basado en eventos de puntero de bajo nivel (`mousedown`, `mousemove`, `mouseup`), calculando proyecciones geométricas precisas de solapamiento y destinos de pista tanto para clips individuales como para colecciones de archivos.
+
+---
+
+## 8. Fase 8: Selección Múltiple y Operaciones en Lote en la Línea de Tiempo
+
+* **Estado de Selección Múltiple en Store:**
+  * Array `selectedClipIds: string[]` junto al id del clip activo `selectedClipId: string | null`.
+  * Acciones especializadas: `selectClip(clipId, mode: 'replace' | 'toggle' | 'add')`, `setSelectedClipIds(ids, primaryId)`, `selectAllClips()` y `clearClipSelection()`.
+* **Caja de Selección Elástica (*Marquee Box*):**
+  * Activación al arrastrar el botón izquierdo del ratón sobre cualquier área vacía del timeline o entre pistas.
+  * **Ancla Invariante al Scroll:** Captura de coordenadas absolutas de contenido `anchorContentX` y `anchorContentY` al iniciar el clic, permitiendo que el auto-scroll vertical y horizontal expanda la selección sin desplazar el origen.
+  * Pruebas de intersección de cajas alineadas a los ejes (AABB math) para seleccionar instantáneamente los clips tocados.
+* **Arrastre en Vivo Determinista sin Compounding Delta:**
+  * Mapeo estático inmutable `initialStarts: Record<string, number>` registrado al pulsar el ratón.
+  * Durante el movimiento, `clip.startTime = initialStarts[id] + clampedDelta`, preservando las distancias relativas exactas y eliminando aceleraciones parabólicas o descalces.
+* **Operaciones en Bloque:**
+  * **Duplicar (`Ctrl+D`):** Clona todos los clips seleccionados y los coloca consecutivamente a la derecha.
+  * **Borrado (`Supr` / `Backspace`):** Elimina el conjunto completo de clips seleccionados junto con sus audios vinculados y limpia pistas vacías.
+  * **Copiar, Cortar y Pegar (`Ctrl+C`, `Ctrl+X`, `Ctrl+V`):** Guarda la matriz de clips con sus desfases relativos y los reproduce idénticamente pegados en la posición de la aguja.
+  * **Insignias y Menú Contextual:** Conteo dinámico en botones de la barra superior y etiquetas actualizadas en el menú de clic derecho.
+* **Corrección de Jerarquía de Capas en WebKitGTK (Tauri Linux):**
+  * La regla de tiempo sticky se elevó a `z-[35]` con `isolate` y `transform: translateZ(0)`, resolviendo el bug visual de WebKitGTK donde las pistas con `z-20` se dibujaban sobre la regla durante el scroll.
+
+---
+
+## 9. Fase 9: Selección Múltiple, Arrastre en Pila e Inserción Secuencial en la Biblioteca de Medios
+
+* **Gestión de Selección en Biblioteca:**
+  * Estado `selectedAssetIds: string[]` con soporte para `Ctrl + Clic` (alternar) y `Shift + Clic` (agregar).
+  * Marquee selection en la cuadrícula de medios con auto-scroll vertical.
+  * Anillo cian y checkmark `✓` en cada elemento seleccionado.
+  * Cabecera contextual con botón de inserción en lote `+`, borrado masivo de biblioteca y botón de deselección rápida `✕`.
+* **Arrastre Múltiple en Pila (*Multi-Asset Drag*):**
+  * Al iniciar el arrastre desde cualquier medio seleccionado, el sistema agrupa automáticamente todos los seleccionados.
+  * Capa fantasma apilada en perspectiva ([`src/components/AssetDragLayer.tsx`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/src/components/AssetDragLayer.tsx)) con ícono de capas, insignia `×N` y duración acumulada total.
+  * Cálculo dinámico del rectángulo de destino punteado en el timeline con ancho ajustado a la suma de duraciones (`sum(duration) * zoom`).
+* **Inserción Secuencial Concatenada (`addAssetsToTimeline`):**
+  * Función que recibe un arreglo de IDs e inserta los medios en serie continua (`t0`, `t0 + d1`, `t0 + d1 + d2...`).
+  * Resuelve colisiones en cada tramo temporal creando pistas según corresponda.
+  * Crea clips vinculados de audio para videos con sonido y selecciona automáticamente todos los nuevos clips creados en la línea de tiempo.
+
+---
+
+## 10. Fase 10: Optimización de Rendimiento y Renderizado Cero-Costo para WebKitGTK / Linux
+
+* **Diagnóstico de Rendimiento en WebKitGTK:**
+  * En Linux, WebKitGTK carece de los optimizadores de composición por GPU presentes en Chromium (Skia), por lo que efectos como `backdrop-filter: blur(...)` o `box-shadow` difusos de 15px en elementos que cambian de tamaño provocan caídas drásticas de frames (a ~15-20 FPS) debido a rasterización por CPU.
+* **Eliminación de Efectos Pesados (Cero Costo GPU):**
+  * Marquee boxes limpios con borde de 1px y relleno semitransparente (`border-[#00d4e5] bg-[#00d4e5]/20`) sin sombras difusas.
+  * Sustitución de `backdrop-blur-xs` en tarjetas por fondo oscuro puro semitransparente `bg-black/85`.
+  * Restricción de transiciones a `transition-colors duration-75` para evitar interpolación continua de sombras durante la selección.
+* **Actualización Directa en el DOM (Cero Re-renderizados de React):**
+  * La caja elástica del cajón se manipula directamente mediante `drawerMarqueeRef.current.style`, evitando que [`EditorWorkspace.tsx`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/src/components/EditorWorkspace.tsx) se re-renderice en cada píxel de movimiento.
+* **Erradicación del *Layout Thrashing*:**
+  * Las posiciones de las tarjetas se miden una sola vez al inicio del clic (`mousedown`).
+  * Las pruebas de intersección se resuelven exclusivamente mediante comparaciones numéricas en memoria RAM, sin invocar `getBoundingClientRect()` ni `querySelectorAll()` dentro del bucle de movimiento.
+* **Sincronización con `requestAnimationFrame` (RAF Throttling):**
+  * Los eventos de ratón se procesan como máximo una vez por fotograma de pantalla (60 Hz / 120 Hz).
+  * Diff previo de selección: el store de Zustand solo es notificado si el conjunto de IDs seleccionados cambió realmente respecto al fotograma anterior, logrando una fluidez constante a 60/120 FPS en Tauri.
+
+---
+
+## 11. Fase 11: Sistema Universal de Keyframes para Video y Audio (Completada)
+
+* **Descripción:**
+  Sistema unificado de animación y automatización paramétrica tanto para video (posición $X/Y$, escala, rotación, opacidad) como para audio (volumen). Se apoya en una función matemática pura de evaluación temporal (`keyframeEngine.ts`), coordenadas relativas al clip (`timeOffset`), curvas de interpolación (`linear`, `ease-in`, `ease-out`, `ease-in-out`, `hold`), integración con el inspector mediante rombos interactivos (`◇` / `◆`), renderizado en Canvas 2D con Gizmo interactivo y auto-keyframing, pipeline de audio en vivo a 60 FPS con Web Audio y exportación mediante expresiones dinámicas de FFmpeg (`volume=eval=frame`). En la línea de tiempo, los clips muestran marcadores romboidales interactivos (`◆`) y envolventes de volumen de tipo *rubber-band* directamente sobre la forma de onda de alta resolución.
+* **Objetivos Logrados:**
+  1. **Motor Matemático Puro e Inmutable (`keyframeEngine.ts`):** Evaluación temporal eficiente con búsqueda binaria $O(\log N)$ para listas extensas de keyframes y deduplicación automática con ventana de tolerancia de 33ms (1 fotograma a 30 FPS).
+  2. **Acciones del Store Zustand e Historial Deshacer/Rehacer (`useProjectStore.ts`):** Mutaciones atómicas inmutables con soporte integral de Undo/Redo (`Ctrl+Z` / `Ctrl+Y`) para inserción, eliminación y limpieza de keyframes.
+  3. **Composición Visual Canvas 2D y Auto-Keyframing en Gizmo (`CanvasPreviewStage.tsx`):** Interpolación continua en tiempo real de transformaciones y auto-inserción de keyframes en el cabezal al interactuar con el Gizmo o controles cuando una propiedad ya está animada.
+  4. **Pipeline Acústico de Audio en Vivo y Exportación FFmpeg (`mediaBackendPlugin.ts` & `ExportModal.tsx`):** Modulación de volumen por fotograma en Web Audio y generación de expresiones matemáticas de volumen compatibles con FFmpeg (`volume=eval=frame`), con anclaje temporal sincronizado con puntos In/Out.
+  5. **Controles Profesionales en el Inspector (`KeyframeControlGroup.tsx`):** Navegación temporal precisa (`‹` y `›`), rombo interactivo reactivo (`◇` / `◆`) para Opacidad, Escala, Posición $X/Y$ vinculada y Rotación en `TransformSection`, y para Volumen en `AudioInspector`.
+  6. **Marcadores Romboidales y Envolvente Rubber-Band en el Timeline (`ClipKeyframeMarkers.tsx` & `VolumeRubberBand.tsx`):** Visualización de rombos cian (`◆`) en clips, resaltado brillante activo con el cabezal, clic directo para salto temporal, y curva continua de volumen SVG interactiva trazada sobre la forma de onda de audio con creación de keyframes por doble clic.
+  7. Especificación detallada y registro de etapas documentados en [`FASE_11.md`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/FASE_11.md).
+* **Refinamientos y Mejoras de Usabilidad Post-Implementación:**
+  * **Preservación Acústica de la Curva en Doble Clic:** Corrección del orden de argumentos en `evaluatePropertyAtTime` en [`VolumeRubberBand.tsx`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/src/components/timeline/VolumeRubberBand.tsx) (`defaultVolume` antes de `timeOffset`), erradicando picos de volumen accidentales (como 934% al cliquear en 9.34s) y asegurando que un nuevo punto adopte fielmente el nivel de volumen interpolado en ese instante.
+  * **Alineación Milimétrica y Supresión de Desfases:** Eliminación del margen `inset-x-1` (4px) en los contenedores de `VolumeRubberBand` y `AudioWaveformCanvas`, sincronizando la línea del cabezal de reproducción exactamente con el centro del rombo en la envolvente.
+  * **Unicidad de Rombos en Clips de Audio (Cero Duplicados):** `ClipKeyframeMarkers` se reserva exclusivamente para propiedades visuales en clips de video, imagen y texto. En clips de audio, el nodo romboidal vive integrado exclusivamente en la curva de volumen que sube y baja, replicando el estándar ergonómico de Premiere Pro y DaVinci Resolve.
+  * **Desacople Visual de Audio en Pistas de Video:** Supresión de la franja secundaria de onda de audio de 12px al pie de los clips de video. Las pistas de video preservan la visibilidad limpia de sus miniaturas (*filmstrip*) y marcadores visuales, delegando la representación acústica a la pista de audio vinculada.
+
+---
+
+## 12. Fase 12: Visualización de Formas de Onda de Audio de Alta Definición (Completada)
+
+* **Descripción:**
+  Reemplazo de la representación preliminar de 60 barras estáticas `<div>` por un sistema profesional de renderizado en `<canvas>` 2D de alta resolución (HiDPI) alimentado por un muestreo de alta densidad en el backend (50 picos/segundo vía streaming con FFmpeg). La visualización responde con precisión milimétrica al nivel de zoom del timeline y a los recortes de inicio y fin del clip (`sourceStart` y `duration`).
+* **Objetivos Principales:**
+  1. **Fidelidad y Precisión Temporal al Recortar:** Proyección exacta de la ventana recortada de audio `[sourceStart ... sourceStart + duration]` sobre la forma de onda, permitiendo cortes quirúrgicos al compás de la música o la locución.
+  2. **Escalabilidad Dinámica al Zoom:** Adaptación continua del nivel de detalle visual a cualquier factor de zoom sin deformar la onda ni provocar pixelación en pantallas Retina/HiDPI.
+  3. **Rendimiento Cero-Costo en WebKitGTK / Linux:** Supresión de cientos de nodos HTML `<div>` del DOM, reemplazándolos por una textura única de Canvas 2D acelerada por hardware.
+  4. **Sinergia con Fase 11 (Keyframes):** Servir como lienzo base idóneo para superponer las líneas de envolvente de volumen (*rubber-bands*) y los nodos romboidales de keyframes en clips de audio.
+  5. Especificación técnica y algoritmo de trazado documentados en [`FASE_12.md`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/FASE_12.md).

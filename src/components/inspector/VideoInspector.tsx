@@ -1,6 +1,6 @@
 import React from 'react';
 import { Sparkles } from 'lucide-react';
-import type { TimelineClip } from '../../types/project';
+import type { TimelineClip, TransitionType } from '../../types/project';
 import { useProjectStore } from '../../store/useProjectStore';
 import { TransformSection } from './TransformSection';
 import { AudioInspector } from './AudioInspector';
@@ -10,13 +10,38 @@ interface VideoInspectorProps {
   activeTab: 'basic' | 'audio' | 'transitions';
 }
 
-const TRANSITION_OPTIONS = [
+export const TRANSITION_OPTIONS: {
+  id: TransitionType;
+  label: string;
+  desc: string;
+}[] = [
   { id: 'crossfade', label: 'Disolución (Crossfade)', desc: 'Fundido suave y continuo' },
-  { id: 'dipToBlack', label: 'Fundido a negro', desc: 'Atenuación a negro y apertura' },
-  { id: 'slideLeft', label: 'Deslizar a la izquierda', desc: 'Entrada dinámica lateral' },
-  { id: 'wipe', label: 'Barrido (Wipe)', desc: 'Corte diagonal progresivo' },
+  { id: 'fade-black', label: 'Fundido a negro', desc: 'Atenuación a negro y apertura' },
+  { id: 'slide-left', label: 'Deslizar a la izquierda', desc: 'Entrada dinámica lateral' },
+  { id: 'wipe-left', label: 'Barrido izquierda (Wipe)', desc: 'Corte progresivo hacia la izquierda' },
+  { id: 'wipe-right', label: 'Barrido derecha (Wipe)', desc: 'Corte progresivo hacia la derecha' },
   { id: 'zoom', label: 'Zoom dinámico', desc: 'Transición con escala acelerada' },
 ];
+
+export function normalizeTransitionType(raw?: string): TransitionType {
+  switch (raw) {
+    case 'crossfade':
+    case 'fade-black':
+    case 'slide-left':
+    case 'wipe-left':
+    case 'wipe-right':
+    case 'zoom':
+      return raw;
+    case 'dipToBlack':
+      return 'fade-black';
+    case 'slideLeft':
+      return 'slide-left';
+    case 'wipe':
+      return 'wipe-left';
+    default:
+      return 'crossfade';
+  }
+}
 
 export const VideoInspector: React.FC<VideoInspectorProps> = ({ clip, activeTab }) => {
   const currentProject = useProjectStore((s) => s.currentProject);
@@ -42,8 +67,20 @@ export const VideoInspector: React.FC<VideoInspectorProps> = ({ clip, activeTab 
     return null;
   }, [currentProject, clip]);
 
+  // Resolver clip de audio vinculado cuando se abre la pestaña de audio de un clip de video
+  const linkedAudioClip = React.useMemo(() => {
+    if (!currentProject || clip.type !== 'video') return clip;
+    if (clip.linkGroupId) {
+      const peer = currentProject.clips.find(
+        (c) => c.id !== clip.id && c.type === 'audio' && c.linkGroupId === clip.linkGroupId
+      );
+      if (peer) return peer;
+    }
+    return clip;
+  }, [currentProject, clip]);
+
   if (activeTab === 'audio') {
-    return <AudioInspector clip={clip} />;
+    return <AudioInspector clip={linkedAudioClip} />;
   }
 
   if (activeTab === 'transitions') {
@@ -58,9 +95,10 @@ export const VideoInspector: React.FC<VideoInspectorProps> = ({ clip, activeTab 
 
         <div className="space-y-1.5">
           {TRANSITION_OPTIONS.map((opt) => {
-            const currentVal = activeOverlap
+            const rawVal = activeOverlap
               ? activeOverlap.clipB.overlapTransition
               : clip.overlapTransition;
+            const currentVal = normalizeTransitionType(rawVal);
             const active = currentVal === opt.id;
             return (
               <button
@@ -68,7 +106,7 @@ export const VideoInspector: React.FC<VideoInspectorProps> = ({ clip, activeTab 
                 type="button"
                 onClick={() => {
                   const targetId = activeOverlap ? activeOverlap.clipB.id : clip.id;
-                  setClipOverlapTransition(targetId, opt.id as any);
+                  setClipOverlapTransition(targetId, opt.id);
                 }}
                 className={`w-full p-2.5 rounded-xl border text-left transition flex items-center justify-between ${
                   active

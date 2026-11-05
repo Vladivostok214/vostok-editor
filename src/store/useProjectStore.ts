@@ -43,6 +43,11 @@ interface ProjectStore {
   isFileBrowserOpen: boolean;
   isMainTrackMagnetic: boolean;
 
+  // Media Offline & Relink (Fase 13)
+  offlineAssetIds: string[];
+  isRelinkModalOpen: boolean;
+  relinkTargetAssetId: string | null;
+
   systemStatus: SystemStatus | null;
   isLoading: boolean;
   isSaving: boolean;
@@ -103,6 +108,12 @@ interface ProjectStore {
   removeAssetFromLibrary: (assetId?: string) => Promise<void>;
   removeSelectedAssetsFromLibrary: () => Promise<void>;
   updateAssetWaveform: (assetId: string, waveform: number[]) => void;
+
+  // Media Offline & Relink Actions (Fase 13)
+  checkProjectMediaStatus: (autoOpenModal?: boolean) => Promise<string[]>;
+  relinkAsset: (assetId: string, newFilePath: string, autoScanSiblings?: boolean) => Promise<{ autoRelinkedCount: number }>;
+  openRelinkModal: (assetId?: string | null) => void;
+  closeRelinkModal: () => void;
 
   // Track Management
   addTrack: (type: TrackType) => Promise<Track | null>;
@@ -367,6 +378,9 @@ export function packMainTrackClips(
   });
 }
 
+let latestSaveRevision = 0;
+let pendingSaveChain: Promise<unknown> = Promise.resolve();
+
 async function persistProjectToDisk(project: ProjectData): Promise<ProjectData> {
   const res = await fetch(apiUrl('/api/projects'), {
     method: 'POST',
@@ -376,6 +390,15 @@ async function persistProjectToDisk(project: ProjectData): Promise<ProjectData> 
   if (!res.ok) throw new Error('Error autoguardando proyecto en disco');
   const data = await res.json();
   return data.project || project;
+}
+
+function enqueueProjectSave(project: ProjectData): { revision: number; promise: Promise<ProjectData> } {
+  const revision = ++latestSaveRevision;
+  const run = pendingSaveChain
+    .catch(() => {})
+    .then(() => persistProjectToDisk(project));
+  pendingSaveChain = run;
+  return { revision, promise: run };
 }
 
 export interface DropIndicator {
@@ -413,6 +436,10 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   isInspectorOpen: false,
   isFileBrowserOpen: false,
   isMainTrackMagnetic: true,
+
+  offlineAssetIds: [],
+  isRelinkModalOpen: false,
+  relinkTargetAssetId: null,
 
   assetDrag: null,
   dropIndicator: null,
@@ -478,8 +505,11 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       clips: [],
     };
 
+    const { revision, promise } = enqueueProjectSave(newProject);
+
     try {
-      const saved = await persistProjectToDisk(newProject);
+      const saved = await promise;
+      if (revision !== latestSaveRevision) return;
       const currentList = get().projects.filter((p) => p.id !== saved.id);
       set({
         currentProject: saved,
@@ -495,6 +525,9 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         isTimelineCollapsed: false,
         isLeftDrawerOpen: false,
         isInspectorOpen: false,
+        offlineAssetIds: [],
+        isRelinkModalOpen: false,
+        relinkTargetAssetId: null,
         projects: [saved, ...currentList],
         view: 'editor',
         isSaving: false,
@@ -502,11 +535,14 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       });
       await get().fetchSystemStatus();
     } catch (err: any) {
-      set({ isSaving: false, errorMessage: err?.message || 'Error creando proyecto' });
+      if (revision === latestSaveRevision) {
+        set({ isSaving: false, errorMessage: err?.message || 'Error creando proyecto' });
+      }
     }
   },
 
   openProject: (project) => {
+    latestSaveRevision++;
     const cleanedTracks =
       project.clips.length === 0 ? [] : pruneEmptyTracks(project.tracks, project.clips);
     const normalizedProject = {
@@ -527,33 +563,54 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       isTimelineCollapsed: false,
       isLeftDrawerOpen: normalizedProject.assets.length > 0,
       isInspectorOpen: false,
+      offlineAssetIds: [],
+      isRelinkModalOpen: false,
+      relinkTargetAssetId: null,
       view: 'editor',
+      isSaving: false,
       lastSavedAt: project.updatedAt,
       errorMessage: null,
     });
+    // Verificación asíncrona no bloqueante de medios al abrir (auto-abre RelinkModal si hay archivos faltantes)
+    void get().checkProjectMediaStatus(true);
   },
 
   closeProjectToHome: async () => {
+    latestSaveRevision++;
     set({
       view: 'home',
       isPlaying: false,
       isFullscreenPreview: false,
       pastProjects: [],
       futureProjects: [],
+      offlineAssetIds: [],
+      isRelinkModalOpen: false,
+      relinkTargetAssetId: null,
+      isSaving: false,
     });
     await get().fetchProjects();
     await get().fetchSystemStatus();
   },
 
   deleteProject: async (id) => {
+    // Defensa preventiva en frontend: no emitir solicitudes destructivas con IDs vacíos o inválidos
+    if (!id || typeof id !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(id.trim())) {
+      set({ errorMessage: 'Identificador de proyecto inválido para eliminación' });
+      return;
+    }
+
+    const cleanId = id.trim();
     try {
-      const res = await fetch(apiUrl(`/api/projects/${encodeURIComponent(id)}`), {
+      const res = await fetch(apiUrl(`/api/projects/${encodeURIComponent(cleanId)}`), {
         method: 'DELETE',
       });
-      if (!res.ok) throw new Error('No se pudo eliminar el proyecto');
+      if (!res.ok) {
+        const errData = await res.json().catch(() => null);
+        throw new Error(errData?.error || 'No se pudo eliminar el proyecto');
+      }
       set((state) => ({
-        projects: state.projects.filter((p) => p.id !== id),
-        currentProject: state.currentProject?.id === id ? null : state.currentProject,
+        projects: state.projects.filter((p) => p.id !== cleanId),
+        currentProject: state.currentProject?.id === cleanId ? null : state.currentProject,
       }));
       await get().fetchSystemStatus();
     } catch (err: any) {
@@ -810,6 +867,14 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     set({ isFileBrowserOpen: val });
   },
 
+  openRelinkModal: (assetId = null) => {
+    set({ isRelinkModalOpen: true, relinkTargetAssetId: assetId ?? null });
+  },
+
+  closeRelinkModal: () => {
+    set({ isRelinkModalOpen: false, relinkTargetAssetId: null });
+  },
+
   toggleMainTrackMagnetic: async () => {
     const nextVal = !get().isMainTrackMagnetic;
     set({ isMainTrackMagnetic: nextVal });
@@ -832,18 +897,32 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   persistCurrentProject: async () => {
     const current = get().currentProject;
     if (!current) return;
-    set({ isSaving: true });
+    const updated = { ...cloneProject(current), updatedAt: new Date().toISOString() };
+    set({ currentProject: updated, isSaving: true });
+    const { revision, promise } = enqueueProjectSave(updated);
     try {
-      const updated = { ...current, updatedAt: new Date().toISOString() };
-      const saved = await persistProjectToDisk(updated);
-      set((state) => ({
-        currentProject: saved,
-        projects: [saved, ...state.projects.filter((p) => p.id !== saved.id)],
-        isSaving: false,
-        lastSavedAt: saved.updatedAt,
-      }));
+      const saved = await promise;
+      set((state) => {
+        const isLatest = revision === latestSaveRevision;
+        const isSameProject = state.currentProject?.id === saved.id;
+        return {
+          currentProject:
+            isLatest && isSameProject && state.currentProject
+              ? {
+                  ...state.currentProject,
+                  updatedAt: saved.updatedAt,
+                  diskSizeBytes: saved.diskSizeBytes,
+                }
+              : state.currentProject,
+          projects: [saved, ...state.projects.filter((p) => p.id !== saved.id)],
+          isSaving: isLatest ? false : state.isSaving,
+          lastSavedAt: isSameProject ? saved.updatedAt : state.lastSavedAt,
+        };
+      });
     } catch (err: any) {
-      set({ isSaving: false, errorMessage: err?.message || 'Error autoguardando proyecto' });
+      if (revision === latestSaveRevision) {
+        set({ isSaving: false, errorMessage: err?.message || 'Error autoguardando proyecto' });
+      }
     }
   },
 
@@ -864,17 +943,32 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       isSaving: true,
     });
 
+    const { revision, promise } = enqueueProjectSave(updatedDraft);
+
     try {
-      const saved = await persistProjectToDisk(updatedDraft);
-      set((state) => ({
-        currentProject: saved,
-        projects: [saved, ...state.projects.filter((p) => p.id !== saved.id)],
-        isSaving: false,
-        lastSavedAt: saved.updatedAt,
-      }));
+      const saved = await promise;
+      set((state) => {
+        const isLatest = revision === latestSaveRevision;
+        const isSameProject = state.currentProject?.id === saved.id;
+        return {
+          currentProject:
+            isLatest && isSameProject && state.currentProject
+              ? {
+                  ...state.currentProject,
+                  updatedAt: saved.updatedAt,
+                  diskSizeBytes: saved.diskSizeBytes,
+                }
+              : state.currentProject,
+          projects: [saved, ...state.projects.filter((p) => p.id !== saved.id)],
+          isSaving: isLatest ? false : state.isSaving,
+          lastSavedAt: isSameProject ? saved.updatedAt : state.lastSavedAt,
+        };
+      });
       return saved;
     } catch (err: any) {
-      set({ isSaving: false, errorMessage: err?.message || 'Error en autoguardado' });
+      if (revision === latestSaveRevision) {
+        set({ isSaving: false, errorMessage: err?.message || 'Error en autoguardado' });
+      }
       return updatedDraft;
     }
   },
@@ -894,16 +988,31 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       isSaving: true,
     });
 
+    const { revision, promise } = enqueueProjectSave(previous);
+
     try {
-      const saved = await persistProjectToDisk(previous);
-      set((state) => ({
-        currentProject: saved,
-        projects: [saved, ...state.projects.filter((p) => p.id !== saved.id)],
-        isSaving: false,
-        lastSavedAt: saved.updatedAt,
-      }));
+      const saved = await promise;
+      set((state) => {
+        const isLatest = revision === latestSaveRevision;
+        const isSameProject = state.currentProject?.id === saved.id;
+        return {
+          currentProject:
+            isLatest && isSameProject && state.currentProject
+              ? {
+                  ...state.currentProject,
+                  updatedAt: saved.updatedAt,
+                  diskSizeBytes: saved.diskSizeBytes,
+                }
+              : state.currentProject,
+          projects: [saved, ...state.projects.filter((p) => p.id !== saved.id)],
+          isSaving: isLatest ? false : state.isSaving,
+          lastSavedAt: isSameProject ? saved.updatedAt : state.lastSavedAt,
+        };
+      });
     } catch (err: any) {
-      set({ isSaving: false, errorMessage: err?.message || 'Error al deshacer (Undo)' });
+      if (revision === latestSaveRevision) {
+        set({ isSaving: false, errorMessage: err?.message || 'Error al deshacer (Undo)' });
+      }
     }
   },
 
@@ -922,16 +1031,31 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       isSaving: true,
     });
 
+    const { revision, promise } = enqueueProjectSave(next);
+
     try {
-      const saved = await persistProjectToDisk(next);
-      set((state) => ({
-        currentProject: saved,
-        projects: [saved, ...state.projects.filter((p) => p.id !== saved.id)],
-        isSaving: false,
-        lastSavedAt: saved.updatedAt,
-      }));
+      const saved = await promise;
+      set((state) => {
+        const isLatest = revision === latestSaveRevision;
+        const isSameProject = state.currentProject?.id === saved.id;
+        return {
+          currentProject:
+            isLatest && isSameProject && state.currentProject
+              ? {
+                  ...state.currentProject,
+                  updatedAt: saved.updatedAt,
+                  diskSizeBytes: saved.diskSizeBytes,
+                }
+              : state.currentProject,
+          projects: [saved, ...state.projects.filter((p) => p.id !== saved.id)],
+          isSaving: isLatest ? false : state.isSaving,
+          lastSavedAt: isSameProject ? saved.updatedAt : state.lastSavedAt,
+        };
+      });
     } catch (err: any) {
-      set({ isSaving: false, errorMessage: err?.message || 'Error al rehacer (Redo)' });
+      if (revision === latestSaveRevision) {
+        set({ isSaving: false, errorMessage: err?.message || 'Error al rehacer (Redo)' });
+      }
     }
   },
 
@@ -1159,6 +1283,163 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         assets: proj.assets.map((a) => (a.id === assetId ? { ...a, waveform } : a)),
       },
     });
+  },
+
+  checkProjectMediaStatus: async (autoOpenModal = false) => {
+    const current = get().currentProject;
+    if (!current || !current.assets || current.assets.length === 0) {
+      set({ offlineAssetIds: [] });
+      return [];
+    }
+
+    try {
+      const payload = {
+        assets: current.assets.map((a) => ({ id: a.id, path: a.path })),
+      };
+      const res = await fetch(apiUrl('/api/media/check-status'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+
+      if (!res.ok) {
+        return get().offlineAssetIds;
+      }
+
+      const data = await res.json();
+      const statusMap = data.status || {};
+      const missingIds = current.assets
+        .filter((a) => statusMap[a.id]?.exists === false)
+        .map((a) => a.id);
+
+      set({ offlineAssetIds: missingIds });
+
+      if (autoOpenModal && missingIds.length > 0) {
+        set({ isRelinkModalOpen: true, relinkTargetAssetId: null });
+      }
+
+      return missingIds;
+    } catch {
+      return get().offlineAssetIds;
+    }
+  },
+
+  relinkAsset: async (assetId: string, newFilePath: string, autoScanSiblings = true) => {
+    const current = get().currentProject;
+    if (!current) return { autoRelinkedCount: 0 };
+
+    const targetAsset = current.assets.find((a) => a.id === assetId);
+    if (!targetAsset) return { autoRelinkedCount: 0 };
+
+    set({ isLoading: true, errorMessage: null });
+
+    try {
+      // 1. Re-inspección y re-vinculación del archivo principal
+      const res = await fetch(apiUrl('/api/media/relink'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ assetId, newPath: newFilePath }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'No se pudo re-vincular el archivo seleccionado');
+      }
+
+      const updatedAsset: MediaAsset = {
+        ...targetAsset,
+        ...data.asset,
+        id: assetId, // Preserva estrictamente el mismo ID del asset para no afectar ningún clip
+      };
+
+      const relinkedMap = new Map<string, MediaAsset>();
+      relinkedMap.set(assetId, updatedAsset);
+
+      // 2. Búsqueda automática en cascada de hermanos en la misma carpeta
+      const targetDir = newFilePath.substring(0, newFilePath.lastIndexOf('/'));
+      const otherOffline = current.assets.filter(
+        (a) => a.id !== assetId && get().offlineAssetIds.includes(a.id)
+      );
+
+      if (autoScanSiblings && otherOffline.length > 0 && targetDir) {
+        const candidateAssets = otherOffline.map((a) => ({
+          id: a.id,
+          name: a.name,
+          path: `${targetDir}/${a.name}`,
+        }));
+
+        try {
+          const checkRes = await fetch(apiUrl('/api/media/check-status'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              assets: candidateAssets.map((c) => ({ id: c.id, path: c.path })),
+            }),
+          });
+
+          if (checkRes.ok) {
+            const checkData = await checkRes.json();
+            const existingSiblings = candidateAssets.filter(
+              (c) => checkData.status?.[c.id]?.exists === true
+            );
+
+            // Re-vincular cada hermano encontrado en paralelo
+            await Promise.all(
+              existingSiblings.map(async (sibling) => {
+                try {
+                  const sRes = await fetch(apiUrl('/api/media/relink'), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ assetId: sibling.id, newPath: sibling.path }),
+                  });
+                  if (sRes.ok) {
+                    const sData = await sRes.json();
+                    const origAsset = current.assets.find((a) => a.id === sibling.id);
+                    if (origAsset) {
+                      relinkedMap.set(sibling.id, {
+                        ...origAsset,
+                        ...sData.asset,
+                        id: sibling.id,
+                      });
+                    }
+                  }
+                } catch {
+                  // Fallback silencioso en caso de fallo individual
+                }
+              })
+            );
+          }
+        } catch {
+          // Fallback silencioso en auto-escaneo de hermanos
+        }
+      }
+
+      // 3. Aplicar mutación atómica a los assets del proyecto
+      await get().commitProjectUpdate((proj) => {
+        const nextAssets = proj.assets.map((a) => relinkedMap.get(a.id) || a);
+        return {
+          ...proj,
+          assets: nextAssets,
+        };
+      });
+
+      // 4. Actualizar estado reactivo de offlineAssetIds
+      const resolvedIds = new Set(relinkedMap.keys());
+      const remainingOffline = get().offlineAssetIds.filter((id) => !resolvedIds.has(id));
+
+      set({
+        offlineAssetIds: remainingOffline,
+        isRelinkModalOpen: remainingOffline.length > 0 ? get().isRelinkModalOpen : false,
+        relinkTargetAssetId: null,
+        isLoading: false,
+      });
+
+      await get().persistCurrentProject();
+
+      return { autoRelinkedCount: relinkedMap.size - 1 };
+    } catch (err: any) {
+      set({ isLoading: false, errorMessage: err?.message || 'Error al re-vincular archivo' });
+      throw err;
+    }
   },
 
   addTrack: async (type) => {

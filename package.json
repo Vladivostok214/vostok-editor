@@ -8,6 +8,8 @@
     "build:server": "esbuild server/standaloneServer.ts --bundle --platform=node --target=node18 --format=esm --outfile=dist-server/index.mjs",
     "build": "npm run build:server && tsc -b && vite build",
     "preview": "vite preview",
+    "test": "node scripts/run-tests.mjs",
+    "test:types": "tsc -p tests/tsconfig.json",
     "tauri": "tauri",
     "desktop:dev": "npm run build:server && tauri dev",
     "desktop:build": "npm run build:server && tauri build"
@@ -27,6 +29,7 @@
     "@types/react-dom": "^18.3.5",
     "@vitejs/plugin-react": "^4.3.4",
     "autoprefixer": "^10.4.20",
+    "esbuild": "^0.25.12",
     "postcss": "^8.4.49",
     "tailwindcss": "^3.4.17",
     "typescript": "~5.6.2",

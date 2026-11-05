@@ -16,6 +16,14 @@
 
 ---
 
+## Estado verificado — 2026-11-04
+
+Documentación contextual contrastable con el código y la configuración vigente. Revisión estática del árbol de trabajo con HEAD `4564f63`, incluidos cambios locales; no se ejecutaron compilaciones ni pruebas. Las capacidades descritas no equivalen a flujos íntegramente validados.
+
+La arquitectura combina React/TypeScript y Zustand, una API HTTP Node con FFmpeg y una envoltura Tauri/Rust que inicia el servidor. En escritorio se usa `http://127.0.0.1:45173`; en desarrollo web, el middleware de Vite.
+
+Persisten riesgos de integridad en autoguardado, reimportación y eliminación de proyectos, además de diferencias entre preview y exportación. La mezcla de audio puede degradarse a video sin sonido sin comunicar el fallo original. Las animaciones en split/rango I/O y algunas transiciones tienen limitaciones. Son conclusiones de inspección estática, no fallos reproducidos en esta revisión. Véanse el [contexto](CONTEXTO_PROYECTO.md) y la [auditoría](docs/audits/AUDITORIA_TECNICA_2026-11-04.md).
+
 ## 🌟 Características Principales
 
 ### 1. Interfaz Minimalista y Moderna
@@ -52,9 +60,9 @@
   * **Transformación Reutilizable:** Opacidad, escala, posición $(X, Y)$, rotación y volteo horizontal.
 
 ### 6. Streaming Local y Exportación Acelerada por GPU
-* **Sin Copias Innecesarias en Disco:** Los archivos se cargan y transmiten desde sus rutas originales en Linux mediante *HTTP Range Requests*.
+* **Streaming por rutas:** Los archivos importados por ruta se transmiten desde sus originales mediante *HTTP Range Requests*. La alternativa `/api/media/import-buffer` copia el medio a caché temporal; limpiar esa caché puede eliminar la copia referenciada por el proyecto.
 * **Pipeline de Exportación con FFmpeg:**
-  * Aceleración por hardware VAAPI (`h264_vaapi`) con *fallback* a `libx264`.
+  * Selección de VAAPI (`h264_vaapi`) o `libx264`. La recuperación tras un fallo del pipe binario es parcial: el fallback tradicional requiere JPEG en disco que el flujo activo no conserva.
   * Espacio de color profesional **ITU-R BT.709**, **H.264 High Profile** y audio **AAC 48 kHz / 192 kbps estéreo**.
   * Modal circular de exportación minimalista con progreso en tiempo real y botón de acceso directo para abrir el directorio de salida en el gestor de archivos de Linux.
 
@@ -72,17 +80,23 @@
 
 ### 8. App de Escritorio Nativa (Tauri v2) y Rendimiento WebKitGTK
 * **Binario Nativo para Linux con Tauri v2:** Empaquetado ligero y eficiente con ventana WebKitGTK y servidor local autónomo en ESM (`dist-server/index.mjs`).
-* **Renderizado Cero-Costo GPU:** Eliminación de filtros costosos (`backdrop-filter: blur`, `box-shadow` difuso en recuadros elásticos), actualizaciones directas en el DOM y *throttling* con `requestAnimationFrame` para 60/120 FPS fluidos.
+* **Optimizaciones de interacción:** Reducción de filtros costosos en recuadros elásticos, actualizaciones directas en el DOM y *throttling* con `requestAnimationFrame`. No se han revalidado cifras de FPS ni consumo en esta revisión.
 
 ### 9. Sistema Universal de Keyframes para Video y Audio
 * **Motor Matemático Puro e Inmutable:** Evaluación de transformaciones visuales ($X/Y$, escala, rotación, opacidad) y volumen con curvas `linear`, `ease-in-out` (SmoothStep), `ease-in`, `ease-out` y `hold`.
 * **Auto-Keyframing Inteligente en Canvas & Gizmo:** Arrastrar, rotar o escalar en el visor con el Gizmo inserta automáticamente fotogramas clave en el instante del cabezal si la propiedad ya está animada.
 * **Controles Profesionales en el Inspector (`◇` / `◆`):** Botones romboidales reactivos con navegación temporal (`‹` y `›`) y edición simultánea para pares de coordenadas ($X/Y$).
-* **Pipeline de Audio y Exportación FFmpeg Dinámica:** Modulación de volumen por frame en Web Audio y generación de expresiones matemáticas de volumen de FFmpeg (`volume=eval=frame`).
+* **Pipeline de Audio y Exportación FFmpeg Dinámica:** Actualización de `HTMLAudioElement.volume` sincronizada con el playhead y generación de expresiones matemáticas de volumen de FFmpeg (`volume=eval=frame`).
 * **Marcadores en Línea de Tiempo y Envolvente *Rubber-Band*:** Rombos interactivos (`◆`) sobre los clips, resaltado con el cabezal, navegación directa al hacer clic y trazado continuo de la envolvente de volumen sobre la forma de onda de audio con creación por doble clic.
 
 ### 10. Formas de Onda de Audio de Alta Definición (HiDPI)
-* **Visualización en Canvas 2D:** Muestreo de 50 picos/segundo acelerado por hardware sin miles de nodos DOM, con adaptación continua al zoom horizontal y proyección milimétrica de recortes (`sourceStart` y `duration`).
+* **Visualización en Canvas 2D:** Muestreo objetivo de 50 picos/segundo, con mínimo de 120 y máximo de 15.000 picos por archivo; después de 300 segundos la densidad disminuye. Canvas 2D con HiDPI y adaptación al zoom y a los recortes (`sourceStart` y `duration`).
+
+### 11. Detección de Media Offline y Re-vinculación Inteligente
+* **Detección No Bloqueante en Disco:** Comprobación asíncrona al abrir proyectos y reescaneo manual. La detección automática en caliente y tras errores de reproducción está pendiente.
+* **Tarjeta Técnica "MEDIA OFFLINE" en Canvas 2D:** Renderizado cinematográfico de advertencia en el monitor de visualización que preserva escala, rotación y posición $(X, Y)$ del clip.
+* **Re-vinculación en Cascada con Explorador Nativo:** Diálogo dedicado ([`RelinkModal.tsx`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/src/components/RelinkModal.tsx)) conectado al explorador interno de la aplicación ([`LocalFileBrowserModal.tsx`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/src/components/LocalFileBrowserModal.tsx)) con búsqueda de otros assets marcados como desconectados por coincidencia de nombre en la carpeta elegida. La compatibilidad del reemplazo y la actualización de fuentes ya cargadas presentan limitaciones.
+* **Protección Preventiva en Exportación:** Advertencia basada en la lista de medios desconectados conocida, sin revalidación de disco previa. La opción de borrador está parcialmente implementada: el lector intenta decodificar videos ausentes antes de dibujar la tarjeta offline.
 
 ---
 
@@ -114,8 +128,9 @@
 
 ## 🛠️ Requisitos del Sistema
 
-* **Sistema Operativo:** Linux (Ubuntu 20.04+, Debian 11+, Fedora 36+, Arch Linux, Manjaro, etc.).
-* **Node.js:** v18.0.0 o superior.
+* **Sistema Operativo objetivo:** Linux con WebKitGTK para escritorio; no se ha verificado aquí una matriz de distribuciones compatibles.
+* **Node.js:** Backend empaquetado con objetivo `node18`; Tauri necesita localizar una instalación de Node en el sistema. La compatibilidad efectiva no se ha revalidado.
+* **Compilación nativa:** Rust mínimo **1.90**, edición **2024**, según `src-tauri/Cargo.toml`, además de las herramientas y bibliotecas de desarrollo de Tauri/WebKitGTK para Linux.
 * **FFmpeg:** Instalado en el sistema con `ffprobe`:
   ```bash
   # En Debian / Ubuntu / Mint:
@@ -146,7 +161,7 @@
    ```bash
    npm run desktop:dev
    ```
-   Compila el servidor backend en `dist-server/index.mjs` y abre la ventana nativa de escritorio con WebKitGTK.
+   Compila el servidor backend en `dist-server/index.mjs` y abre la ventana nativa de escritorio con WebKitGTK. `npm run tauri dev` ejecuta Vite mediante `beforeDevCommand`, pero requiere preparar antes el bundle con `npm run build:server`.
 
 4. **Ejecutar en modo Navegador Web (Vite):**
    ```bash
@@ -164,13 +179,25 @@
    npm run build
    ```
 
+7. **Ejecutar suite de pruebas aisladas:**
+   ```bash
+   npm test
+   # Comprobación de tipos en pruebas:
+   npm run test:types
+   ```
+   Las pruebas se ejecutan en un sandbox temporal aislado en `/tmp` con guardas de red que bloquean accesos externos o al puerto local `45173`. No tocan el almacenamiento personal ni requieren dependencias externas adicionales.
+
 ---
 
 ## 📂 Estructura del Código
 
 ```text
-├── CONTEXTO_PROYECTO.md        # Especificación completa y Single Source of Truth
+├── CONTEXTO_PROYECTO.md        # Contexto contrastable con código y configuración
 ├── README.md                   # Presentación y guía rápida del proyecto
+├── docs/                       # Especificaciones técnicas detalladas por fase
+│   ├── FASE_11.md              # Sistema Universal de Keyframes para Video y Audio
+│   ├── FASE_12.md              # Formas de Onda de Audio en Canvas 2D HiDPI
+│   └── FASE_13.md              # Media Offline & Relink Engine
 ├── package.json                # Dependencias (Tauri, React, Zustand, Tailwind, Lucide, TikTok Sans)
 ├── tailwind.config.js          # Configuración de paleta oscura y tipografía
 ├── vite.config.ts              # Configuración de Vite con plugin backend local
@@ -199,6 +226,7 @@
         ├── TimelinePanel.tsx   # Línea de tiempo multipista, clips vinculados y transiciones
         ├── AudioWaveformCanvas.tsx # Renderizador HiDPI de formas de onda en Canvas 2D
         ├── ExportModal.tsx     # Diálogo de exportación circular acelerada por GPU
+        ├── RelinkModal.tsx     # Diálogo de re-vinculación de medios offline con búsqueda en cascada
         ├── LocalFileBrowserModal.tsx # Explorador del sistema de archivos Linux
         ├── AssetDragLayer.tsx  # Capa de previsualización fantasma en arrastres múltiples
         ├── timeline/           # Subcomponentes interactivos de la línea de tiempo

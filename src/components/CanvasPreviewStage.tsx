@@ -9,6 +9,7 @@ import {
 import { useProjectStore } from '../store/useProjectStore';
 import { apiUrl } from '../config/api';
 import { computeTrackOverlaps } from './TimelinePanel';
+import { normalizeTransitionType } from './inspector/VideoInspector';
 import type { AspectRatio, MediaAsset, ProjectData, TimelineClip } from '../types/project';
 import { evaluatePropertyAtTime } from '../lib/keyframeEngine';
 
@@ -26,6 +27,19 @@ export function getResolutionForRatio(
     width: Math.round(base.width * scaleFactor),
     height: Math.round(base.height * scaleFactor),
   };
+}
+
+export function getCanvasResolutionScale(
+  canvasWidth: number,
+  canvasHeight: number,
+  aspectRatio?: AspectRatio
+): number {
+  if (aspectRatio) {
+    const base = getResolutionForRatio(aspectRatio, 1);
+    return canvasWidth / base.width;
+  }
+  const refDim = Math.min(canvasWidth, canvasHeight);
+  return refDim > 0 ? refDim / 1080 : 1;
 }
 
 export interface ClipVisualBox {
@@ -64,8 +78,12 @@ export function drawSingleClipToContext(
   extraAlpha = 1,
   extraOffsetX = 0,
   extraScale = 1,
-  currentTime?: number
+  currentTime?: number,
+  isOffline = false,
+  offlinePath?: string,
+  resolutionScale?: number
 ): ClipVisualBox | null {
+  const resScale = resolutionScale ?? getCanvasResolutionScale(canvasWidth, canvasHeight);
   const baseTf = clip.transform || { x: 0, y: 0, scale: 1, rotation: 0, opacity: 1, flipX: false };
   const timeOffset =
     currentTime !== undefined
@@ -84,8 +102,8 @@ export function drawSingleClipToContext(
   const finalAlpha = Math.max(0, Math.min(1, tf.opacity * extraAlpha));
   if (finalAlpha <= 0.005) return null;
 
-  const centerX = canvasWidth / 2 + tf.x + extraOffsetX;
-  const centerY = canvasHeight / 2 + tf.y;
+  const centerX = canvasWidth / 2 + tf.x * resScale + extraOffsetX;
+  const centerY = canvasHeight / 2 + tf.y * resScale;
   const totalScale = Math.max(0.05, tf.scale * extraScale);
   const rad = (tf.rotation * Math.PI) / 180;
 
@@ -95,14 +113,15 @@ export function drawSingleClipToContext(
   ctx.rotate(rad);
   ctx.scale(tf.flipX ? -totalScale : totalScale, totalScale);
 
-  let baseWidth = 400;
-  let baseHeight = 220;
+  let baseWidth = 400 * resScale;
+  let baseHeight = 220 * resScale;
 
   if (clip.type === 'text' && clip.textConfig) {
     const cfg = clip.textConfig;
     const rawSize = cfg.fontSize ?? 16;
-    // Escala normalizada de video (5 a 32): factor 9.5 para resolución Full HD 1080p nativa
-    const renderedFontSize = rawSize <= 32 ? Math.round(rawSize * 9.5) : rawSize;
+    // Escala normalizada de video (5 a 32): factor 9.5 para resolución Full HD 1080p nativa, escalado a la resolución destino
+    const baseFontSize = rawSize <= 32 ? Math.round(rawSize * 9.5) : rawSize;
+    const renderedFontSize = Math.max(1, Math.round(baseFontSize * resScale));
 
     const weight = cfg.bold ? Math.max(700, cfg.fontWeight || 700) : (cfg.fontWeight || 400);
     const fontStyle = `${cfg.italic ? 'italic ' : ''}${weight} ${renderedFontSize}px "${cfg.fontFamily || 'TikTok Sans Variable'}", sans-serif`;
@@ -112,14 +131,14 @@ export function drawSingleClipToContext(
 
     // Soporte para espaciado entre letras (Kerning) en Canvas 2D
     if ('letterSpacing' in ctx) {
-      (ctx as any).letterSpacing = `${cfg.letterSpacing || 0}px`;
+      (ctx as any).letterSpacing = `${((cfg.letterSpacing || 0) * resScale).toFixed(2)}px`;
     }
 
     const rawContent = cfg.content || '';
     const finalContent = cfg.uppercase ? rawContent.toUpperCase() : rawContent;
     const lines = finalContent.split('\n');
     const lineHeight = renderedFontSize * (cfg.lineHeightMultiplier || 1.25);
-    let maxLineW = 120;
+    let maxLineW = 120 * resScale;
     const lineWidths: number[] = [];
     for (const line of lines) {
       const m = ctx.measureText(line);
@@ -128,18 +147,18 @@ export function drawSingleClipToContext(
       if (w > maxLineW) maxLineW = w;
     }
 
-    baseWidth = maxLineW + 48;
-    baseHeight = lines.length * lineHeight + 28;
+    baseWidth = maxLineW + 48 * resScale;
+    baseHeight = lines.length * lineHeight + 28 * resScale;
 
     if (cfg.backgroundColor && cfg.backgroundColor !== 'transparent') {
       ctx.fillStyle = cfg.backgroundColor;
       ctx.beginPath();
-      ctx.roundRect(-baseWidth / 2, -baseHeight / 2, baseWidth, baseHeight, 14);
+      ctx.roundRect(-baseWidth / 2, -baseHeight / 2, baseWidth, baseHeight, 14 * resScale);
       ctx.fill();
     }
 
     const hasStroke = cfg.strokeColor && cfg.strokeColor !== 'transparent' && (cfg.strokeWidth || 0) > 0;
-    const strokeW = cfg.strokeWidth || 4;
+    const strokeW = (cfg.strokeWidth || 4) * resScale;
 
     lines.forEach((line, idx) => {
       const yOffset = (idx - (lines.length - 1) / 2) * lineHeight;
@@ -174,10 +193,10 @@ export function drawSingleClipToContext(
         if (cfg.align === 'left') lineX = xOffset;
         if (cfg.align === 'right') lineX = xOffset - lineW;
 
-        const lineY = yOffset + cfg.fontSize * 0.55;
+        const lineY = yOffset + renderedFontSize * 0.55;
         ctx.save();
         ctx.strokeStyle = cfg.color || '#ffffff';
-        ctx.lineWidth = Math.max(2, cfg.fontSize * 0.08);
+        ctx.lineWidth = Math.max(2 * resScale, renderedFontSize * 0.08);
         ctx.beginPath();
         ctx.moveTo(lineX, lineY);
         ctx.lineTo(lineX + lineW, lineY);
@@ -185,26 +204,29 @@ export function drawSingleClipToContext(
         ctx.restore();
       }
     });
-  } else if (mediaSource) {
-    const srcW =
-      mediaSource instanceof HTMLVideoElement
-        ? mediaSource.videoWidth || 1280
-        : mediaSource instanceof HTMLImageElement
-        ? mediaSource.naturalWidth || 1280
-        : mediaSource.width || 1280;
-    const srcH =
-      mediaSource instanceof HTMLVideoElement
-        ? mediaSource.videoHeight || 720
-        : mediaSource instanceof HTMLImageElement
-        ? mediaSource.naturalHeight || 720
-        : mediaSource.height || 720;
+  } else if (!isOffline && mediaSource) {
+    const isVideoEl =
+      typeof HTMLVideoElement !== 'undefined' && mediaSource instanceof HTMLVideoElement;
+    const isImageEl =
+      typeof HTMLImageElement !== 'undefined' && mediaSource instanceof HTMLImageElement;
+
+    const srcW = isVideoEl
+      ? mediaSource.videoWidth || 1280
+      : isImageEl
+      ? mediaSource.naturalWidth || 1280
+      : mediaSource.width || 1280;
+    const srcH = isVideoEl
+      ? mediaSource.videoHeight || 720
+      : isImageEl
+      ? mediaSource.naturalHeight || 720
+      : mediaSource.height || 720;
 
     const fitScale = Math.min(canvasWidth / srcW, canvasHeight / srcH);
     baseWidth = srcW * fitScale;
     baseHeight = srcH * fitScale;
 
     try {
-      if (mediaSource instanceof HTMLVideoElement) {
+      if (isVideoEl) {
         if (mediaSource.readyState >= 2 && mediaSource.videoWidth > 0 && mediaSource.videoHeight > 0) {
           ctx.drawImage(mediaSource, -baseWidth / 2, -baseHeight / 2, baseWidth, baseHeight);
         }
@@ -213,6 +235,68 @@ export function drawSingleClipToContext(
       }
     } catch {
       // Ignore if media frame is not decoded yet
+    }
+  } else if (isOffline && clip.type !== 'text') {
+    // Cartel Técnico Cinematográfico "MEDIA OFFLINE" en Canvas 2D
+    baseWidth = Math.min(640 * resScale, canvasWidth * 0.7);
+    baseHeight = Math.min(360 * resScale, canvasHeight * 0.45);
+
+    try {
+      // 1. Fondo de tarjeta carbón oscuro
+      ctx.fillStyle = '#141518';
+      ctx.beginPath();
+      if (typeof (ctx as any).roundRect === 'function') {
+        (ctx as any).roundRect(-baseWidth / 2, -baseHeight / 2, baseWidth, baseHeight, 14 * resScale);
+      } else {
+        ctx.rect(-baseWidth / 2, -baseHeight / 2, baseWidth, baseHeight);
+      }
+      ctx.fill();
+
+      // 2. Borde de advertencia rojo
+      ctx.strokeStyle = '#ef4444';
+      ctx.lineWidth = Math.max(1.5, 3 * resScale);
+      ctx.stroke();
+
+      // 3. Franja técnica superior de advertencia
+      const stripeH = Math.max(4, 8 * resScale);
+      ctx.save();
+      ctx.beginPath();
+      if (typeof (ctx as any).roundRect === 'function') {
+        (ctx as any).roundRect(-baseWidth / 2, -baseHeight / 2, baseWidth, stripeH, [14 * resScale, 14 * resScale, 0, 0]);
+      } else {
+        ctx.rect(-baseWidth / 2, -baseHeight / 2, baseWidth, stripeH);
+      }
+      ctx.clip();
+      ctx.fillStyle = '#dc2626';
+      ctx.fillRect(-baseWidth / 2, -baseHeight / 2, baseWidth, stripeH);
+      ctx.restore();
+
+      // 4. Cabecera "MEDIA OFFLINE"
+      ctx.fillStyle = '#ef4444';
+      ctx.font = `bold ${Math.max(12, Math.round(22 * resScale))}px "TikTok Sans Variable", sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('⚠  MEDIA OFFLINE', 0, -baseHeight * 0.22);
+
+      // 5. Nombre del archivo/clip
+      ctx.fillStyle = '#ffffff';
+      ctx.font = `600 ${Math.max(10, Math.round(16 * resScale))}px "TikTok Sans Variable", sans-serif`;
+      const displayName = clip.name.length > 36 ? `${clip.name.slice(0, 33)}...` : clip.name;
+      ctx.fillText(displayName, 0, -baseHeight * 0.04);
+
+      // 6. Última ruta registrada
+      ctx.fillStyle = '#9ca3af';
+      ctx.font = `${Math.max(8, Math.round(11 * resScale))}px monospace`;
+      const rawPath = offlinePath || clip.name;
+      const displayPath = rawPath.length > 48 ? `...${rawPath.slice(-45)}` : rawPath;
+      ctx.fillText(displayPath, 0, baseHeight * 0.12);
+
+      // 7. Pista para re-vincular
+      ctx.fillStyle = '#00d4e5';
+      ctx.font = `${Math.max(8, Math.round(11 * resScale))}px "TikTok Sans Variable", sans-serif`;
+      ctx.fillText('Clic derecho en el clip para re-vincular', 0, baseHeight * 0.32);
+    } catch {
+      // Protección defensiva en caso de fallo gráfico
     }
   }
 
@@ -234,12 +318,21 @@ export function renderProjectFrameToCanvas(
   canvasHeight: number,
   project: ProjectData,
   time: number,
-  mediaElements: Map<string, CanvasDrawableSource>
+  mediaElements: Map<string, CanvasDrawableSource>,
+  offlineAssetIds?: string[]
 ): ClipVisualBox[] {
+  const resScale = getCanvasResolutionScale(canvasWidth, canvasHeight, project.aspectRatio);
+
   ctx.save();
   ctx.fillStyle = '#0a0a0c';
   ctx.fillRect(0, 0, canvasWidth, canvasHeight);
   ctx.restore();
+
+  const getClipOfflineInfo = (c: TimelineClip) => {
+    const isOff = Boolean(c.assetId && offlineAssetIds && offlineAssetIds.includes(c.assetId));
+    const asset = c.assetId ? project.assets.find((a) => a.id === c.assetId) : undefined;
+    return { isOff, path: asset?.path || asset?.name };
+  };
 
   const drawnBoxes: ClipVisualBox[] = [];
   const orderedTracks = [...project.tracks].reverse();
@@ -260,27 +353,29 @@ export function renderProjectFrameToCanvas(
     if (activeOverlap) {
       const { clipA, clipB, startTime, duration } = activeOverlap;
       const p = Math.max(0, Math.min(1, (time - startTime) / Math.max(0.05, duration)));
-      const transition = clipB.overlapTransition || 'crossfade';
+      const transition = normalizeTransitionType(clipB.overlapTransition);
       const srcA = mediaElements.get(clipA.id);
       const srcB = mediaElements.get(clipB.id);
+      const offA = getClipOfflineInfo(clipA);
+      const offB = getClipOfflineInfo(clipB);
 
       if (transition === 'crossfade') {
-        const b1 = drawSingleClipToContext(ctx, canvasWidth, canvasHeight, clipA, srcA, 1 - p, 0, 1, time);
-        const b2 = drawSingleClipToContext(ctx, canvasWidth, canvasHeight, clipB, srcB, p, 0, 1, time);
+        const b1 = drawSingleClipToContext(ctx, canvasWidth, canvasHeight, clipA, srcA, 1 - p, 0, 1, time, offA.isOff, offA.path, resScale);
+        const b2 = drawSingleClipToContext(ctx, canvasWidth, canvasHeight, clipB, srcB, p, 0, 1, time, offB.isOff, offB.path, resScale);
         if (b1) drawnBoxes.push(b1);
         if (b2) drawnBoxes.push(b2);
       } else if (transition === 'fade-black') {
         if (p < 0.5) {
           const alphaA = 1 - p * 2;
-          const b1 = drawSingleClipToContext(ctx, canvasWidth, canvasHeight, clipA, srcA, alphaA, 0, 1, time);
+          const b1 = drawSingleClipToContext(ctx, canvasWidth, canvasHeight, clipA, srcA, alphaA, 0, 1, time, offA.isOff, offA.path, resScale);
           if (b1) drawnBoxes.push(b1);
         } else {
           const alphaB = (p - 0.5) * 2;
-          const b2 = drawSingleClipToContext(ctx, canvasWidth, canvasHeight, clipB, srcB, alphaB, 0, 1, time);
+          const b2 = drawSingleClipToContext(ctx, canvasWidth, canvasHeight, clipB, srcB, alphaB, 0, 1, time, offB.isOff, offB.path, resScale);
           if (b2) drawnBoxes.push(b2);
         }
       } else if (transition === 'wipe-left' || transition === 'wipe-right') {
-        const b1 = drawSingleClipToContext(ctx, canvasWidth, canvasHeight, clipA, srcA, 1, 0, 1, time);
+        const b1 = drawSingleClipToContext(ctx, canvasWidth, canvasHeight, clipA, srcA, 1, 0, 1, time, offA.isOff, offA.path, resScale);
         if (b1) drawnBoxes.push(b1);
 
         ctx.save();
@@ -291,7 +386,7 @@ export function renderProjectFrameToCanvas(
           ctx.rect(0, 0, canvasWidth * p, canvasHeight);
         }
         ctx.clip();
-        const b2 = drawSingleClipToContext(ctx, canvasWidth, canvasHeight, clipB, srcB, 1, 0, 1, time);
+        const b2 = drawSingleClipToContext(ctx, canvasWidth, canvasHeight, clipB, srcB, 1, 0, 1, time, offB.isOff, offB.path, resScale);
         ctx.restore();
         if (b2) drawnBoxes.push(b2);
       } else if (transition === 'slide-left') {
@@ -304,7 +399,10 @@ export function renderProjectFrameToCanvas(
           1,
           -p * canvasWidth,
           1,
-          time
+          time,
+          offA.isOff,
+          offA.path,
+          resScale
         );
         const b2 = drawSingleClipToContext(
           ctx,
@@ -315,7 +413,10 @@ export function renderProjectFrameToCanvas(
           1,
           (1 - p) * canvasWidth,
           1,
-          time
+          time,
+          offB.isOff,
+          offB.path,
+          resScale
         );
         if (b1) drawnBoxes.push(b1);
         if (b2) drawnBoxes.push(b2);
@@ -329,7 +430,10 @@ export function renderProjectFrameToCanvas(
           1 - p,
           0,
           1 + p * 0.45,
-          time
+          time,
+          offA.isOff,
+          offA.path,
+          resScale
         );
         const b2 = drawSingleClipToContext(
           ctx,
@@ -340,7 +444,10 @@ export function renderProjectFrameToCanvas(
           p,
           0,
           0.65 + p * 0.35,
-          time
+          time,
+          offB.isOff,
+          offB.path,
+          resScale
         );
         if (b1) drawnBoxes.push(b1);
         if (b2) drawnBoxes.push(b2);
@@ -349,6 +456,7 @@ export function renderProjectFrameToCanvas(
       for (const clip of activeClips) {
         const fadeAlpha = computeClipIndividualFadeAlpha(clip, time);
         const src = mediaElements.get(clip.id);
+        const off = getClipOfflineInfo(clip);
         const box = drawSingleClipToContext(
           ctx,
           canvasWidth,
@@ -358,7 +466,10 @@ export function renderProjectFrameToCanvas(
           fadeAlpha,
           0,
           1,
-          time
+          time,
+          off.isOff,
+          off.path,
+          resScale
         );
         if (box) drawnBoxes.push(box);
       }
@@ -383,6 +494,7 @@ export const CanvasPreviewStage: React.FC = () => {
     setIsFileBrowserOpen,
     importDroppedFiles,
     addAssetToTimeline,
+    offlineAssetIds,
   } = useProjectStore();
 
   const wrapperRef = useRef<HTMLDivElement | null>(null);
@@ -452,45 +564,77 @@ export const CanvasPreviewStage: React.FC = () => {
       );
       if (!asset) continue;
 
-      if (clip.type === 'video' && !mediaElementsRef.current.has(clip.id)) {
-        const vid = document.createElement('video');
-        vid.src = apiUrl(asset.url);
-        vid.preload = 'auto';
-        vid.muted = true;
-        vid.playsInline = true;
-        vid.crossOrigin = 'anonymous';
-        vid.style.position = 'absolute';
-        vid.style.width = '1px';
-        vid.style.height = '1px';
-        vid.style.opacity = '0.001';
-        vid.style.pointerEvents = 'none';
+      const targetUrl = apiUrl(asset.url);
 
-        const onFrameReady = () => setTickRender((n) => n + 1);
-        vid.addEventListener('loadeddata', onFrameReady);
-        vid.addEventListener('canplay', onFrameReady);
-        vid.addEventListener('seeked', onFrameReady);
-        vid.addEventListener('timeupdate', onFrameReady);
-        vid.addEventListener('loadedmetadata', () => {
-          if (vid.currentTime === 0) {
-            vid.currentTime = 0.001;
+      if (clip.type === 'video') {
+        const existingVid = mediaElementsRef.current.get(clip.id) as HTMLVideoElement | undefined;
+        if (existingVid && existingVid.getAttribute('data-source-url') !== targetUrl) {
+          existingVid.pause();
+          existingVid.removeAttribute('src');
+          existingVid.load();
+          if (existingVid.parentNode) {
+            existingVid.parentNode.removeChild(existingVid);
           }
-          setTickRender((n) => n + 1);
-        });
-
-        if (videoPoolContainerRef.current) {
-          videoPoolContainerRef.current.appendChild(vid);
+          mediaElementsRef.current.delete(clip.id);
         }
-        mediaElementsRef.current.set(clip.id, vid);
-      } else if (clip.type === 'image' && !mediaElementsRef.current.has(clip.id)) {
-        const img = new Image();
-        img.src = apiUrl(asset.url);
-        img.crossOrigin = 'anonymous';
-        img.onload = () => setTickRender((n) => n + 1);
-        mediaElementsRef.current.set(clip.id, img);
-      } else if (clip.type === 'audio' && !audioElementsRef.current.has(clip.id)) {
-        const aud = new Audio(apiUrl(asset.url));
-        aud.preload = 'auto';
-        audioElementsRef.current.set(clip.id, aud);
+        if (!mediaElementsRef.current.has(clip.id)) {
+          const vid = document.createElement('video');
+          vid.src = targetUrl;
+          vid.setAttribute('data-source-url', targetUrl);
+          vid.preload = 'auto';
+          vid.muted = true;
+          vid.playsInline = true;
+          vid.crossOrigin = 'anonymous';
+          vid.style.position = 'absolute';
+          vid.style.width = '1px';
+          vid.style.height = '1px';
+          vid.style.opacity = '0.001';
+          vid.style.pointerEvents = 'none';
+
+          const onFrameReady = () => setTickRender((n) => n + 1);
+          vid.addEventListener('loadeddata', onFrameReady);
+          vid.addEventListener('canplay', onFrameReady);
+          vid.addEventListener('seeked', onFrameReady);
+          vid.addEventListener('timeupdate', onFrameReady);
+          vid.addEventListener('loadedmetadata', () => {
+            if (vid.currentTime === 0) {
+              vid.currentTime = 0.001;
+            }
+            setTickRender((n) => n + 1);
+          });
+
+          if (videoPoolContainerRef.current) {
+            videoPoolContainerRef.current.appendChild(vid);
+          }
+          mediaElementsRef.current.set(clip.id, vid);
+        }
+      } else if (clip.type === 'image') {
+        const existingImg = mediaElementsRef.current.get(clip.id) as HTMLImageElement | undefined;
+        if (existingImg && existingImg.getAttribute('data-source-url') !== targetUrl) {
+          mediaElementsRef.current.delete(clip.id);
+        }
+        if (!mediaElementsRef.current.has(clip.id)) {
+          const img = new Image();
+          img.setAttribute('data-source-url', targetUrl);
+          img.src = targetUrl;
+          img.crossOrigin = 'anonymous';
+          img.onload = () => setTickRender((n) => n + 1);
+          mediaElementsRef.current.set(clip.id, img);
+        }
+      } else if (clip.type === 'audio') {
+        const existingAud = audioElementsRef.current.get(clip.id);
+        if (existingAud && existingAud.getAttribute('data-source-url') !== targetUrl) {
+          existingAud.pause();
+          existingAud.removeAttribute('src');
+          existingAud.load();
+          audioElementsRef.current.delete(clip.id);
+        }
+        if (!audioElementsRef.current.has(clip.id)) {
+          const aud = new Audio(targetUrl);
+          aud.setAttribute('data-source-url', targetUrl);
+          aud.preload = 'auto';
+          audioElementsRef.current.set(clip.id, aud);
+        }
       }
     }
   }, [currentProject]);
@@ -580,7 +724,8 @@ export const CanvasPreviewStage: React.FC = () => {
       canvas.height,
       currentProject,
       playheadTime,
-      mediaElementsRef.current
+      mediaElementsRef.current,
+      offlineAssetIds
     );
     lastBoxesRef.current = boxes;
   });

@@ -7,6 +7,8 @@ import {
   FolderOpen,
   Cpu,
   ChevronDown,
+  AlertTriangle,
+  Link,
 } from 'lucide-react';
 import { useProjectStore } from '../store/useProjectStore';
 import { apiUrl } from '../config/api';
@@ -32,14 +34,110 @@ function formatBytes(bytes = 0): string {
 }
 
 /**
+ * Extrae el siguiente fotograma completo de un flujo `image2pipe` (JPEG o PNG).
+ * - JPEG: Delimitado por marcadores SOI (`FF D8`) y EOI (`FF D9`).
+ * - PNG: Delimitado por firma de 8 bytes (`89 50 4E 47 0D 0A 1A 0A`) y bloques `[length:4][type:4][data:length][crc:4]` hasta `IEND`.
+ */
+export function extractNextImageFrameFromBuffer(
+  buf: Uint8Array,
+  mimeType: 'image/jpeg' | 'image/png' = 'image/jpeg'
+): { frame: Uint8Array; remaining: Uint8Array } | null {
+  const len = buf.length;
+
+  if (mimeType === 'image/png') {
+    // Firma PNG: 89 50 4E 47 0D 0A 1A 0A
+    if (len < 8) return null;
+    let start = -1;
+    for (let i = 0; i <= len - 8; i++) {
+      if (
+        buf[i] === 0x89 &&
+        buf[i + 1] === 0x50 &&
+        buf[i + 2] === 0x4e &&
+        buf[i + 3] === 0x47 &&
+        buf[i + 4] === 0x0d &&
+        buf[i + 5] === 0x0a &&
+        buf[i + 6] === 0x1a &&
+        buf[i + 7] === 0x0a
+      ) {
+        start = i;
+        break;
+      }
+    }
+    if (start === -1) {
+      return null;
+    }
+
+    // Recorrer chunks de PNG a partir de start + 8:
+    // Cada chunk tiene: 4 bytes length (big-endian) + 4 bytes type + length bytes data + 4 bytes CRC
+    let cursor = start + 8;
+    while (cursor + 12 <= len) {
+      const chunkLen =
+        ((buf[cursor] << 24) >>> 0) +
+        ((buf[cursor + 1] << 16) >>> 0) +
+        ((buf[cursor + 2] << 8) >>> 0) +
+        (buf[cursor + 3] >>> 0);
+      const totalChunkBytes = 12 + chunkLen;
+      if (cursor + totalChunkBytes > len) {
+        // Todavía no han llegado todos los bytes de este chunk
+        return null;
+      }
+      const isIEND =
+        buf[cursor + 4] === 0x49 && // 'I'
+        buf[cursor + 5] === 0x45 && // 'E'
+        buf[cursor + 6] === 0x4e && // 'N'
+        buf[cursor + 7] === 0x44;   // 'D'
+      cursor += totalChunkBytes;
+      if (isIEND) {
+        return {
+          frame: buf.slice(start, cursor),
+          remaining: buf.slice(cursor),
+        };
+      }
+    }
+    return null;
+  }
+
+  // Modo por defecto: MJPEG (FF D8 ... FF D9)
+  if (len < 4) return null;
+
+  let soi = -1;
+  for (let i = 0; i < len - 1; i++) {
+    if (buf[i] === 0xff && buf[i + 1] === 0xd8) {
+      soi = i;
+      break;
+    }
+  }
+  if (soi === -1) {
+    return null;
+  }
+
+  let eoi = -1;
+  for (let i = soi + 2; i < len - 1; i++) {
+    if (buf[i] === 0xff && buf[i + 1] === 0xd9) {
+      eoi = i + 2;
+      break;
+    }
+  }
+  if (eoi === -1) {
+    return null;
+  }
+
+  return {
+    frame: buf.slice(soi, eoi),
+    remaining: buf.slice(eoi),
+  };
+}
+
+/**
  * Decodificador secuencial de fotogramas de video impulsado por FFmpeg (`image2pipe`).
  * Elimina por completo el "seek penalty" del elemento `<video>` de HTML5:
- * lee el flujo MJPEG continuo en orden secuencial sin re-decodificar GOPs.
+ * lee el flujo MJPEG (videos opacos) o PNG RGBA (videos con canal Alpha como ProRes 4444) en orden secuencial.
  */
 class SequentialVideoFrameReader {
   private reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
   private buffer: Uint8Array = new Uint8Array(0);
   private eof = false;
+  private frameMime: 'image/jpeg' | 'image/png' = 'image/jpeg';
   public currentBitmap: ImageBitmap | null = null;
   public currentFrameIndex = -1;
 
@@ -63,6 +161,8 @@ class SequentialVideoFrameReader {
     if (!res.ok || !res.body) {
       throw new Error(`No se pudo iniciar la decodificación secuencial de ${filePath}`);
     }
+    const headerMime = res.headers.get('x-frame-mime');
+    this.frameMime = headerMime === 'image/png' ? 'image/png' : 'image/jpeg';
     this.reader = res.body.getReader();
   }
 
@@ -73,47 +173,18 @@ class SequentialVideoFrameReader {
     this.buffer = next;
   }
 
-  private tryExtractNextJpeg(): Uint8Array | null {
-    const buf = this.buffer;
-    const len = buf.length;
-    if (len < 4) return null;
-
-    let soi = -1;
-    for (let i = 0; i < len - 1; i++) {
-      if (buf[i] === 0xff && buf[i + 1] === 0xd8) {
-        soi = i;
-        break;
-      }
-    }
-    if (soi === -1) {
-      this.buffer = new Uint8Array(0);
-      return null;
-    }
-
-    let eoi = -1;
-    for (let i = soi + 2; i < len - 1; i++) {
-      if (buf[i] === 0xff && buf[i + 1] === 0xd9) {
-        eoi = i + 2;
-        break;
-      }
-    }
-    if (eoi === -1) {
-      if (soi > 0) {
-        this.buffer = buf.slice(soi);
-      }
-      return null;
-    }
-
-    const jpegBytes = buf.slice(soi, eoi);
-    this.buffer = buf.slice(eoi);
-    return jpegBytes;
+  private tryExtractNextFrame(): Uint8Array | null {
+    const extracted = extractNextImageFrameFromBuffer(this.buffer, this.frameMime);
+    if (!extracted) return null;
+    this.buffer = extracted.remaining;
+    return extracted.frame;
   }
 
   private async readNextBitmap(): Promise<ImageBitmap | null> {
     while (true) {
-      const jpegBytes = this.tryExtractNextJpeg();
-      if (jpegBytes) {
-        const blob = new Blob([jpegBytes], { type: 'image/jpeg' });
+      const frameBytes = this.tryExtractNextFrame();
+      if (frameBytes) {
+        const blob = new Blob([frameBytes], { type: this.frameMime });
         return await createImageBitmap(blob);
       }
       if (this.eof || !this.reader) {
@@ -165,7 +236,8 @@ class SequentialVideoFrameReader {
 }
 
 export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose }) => {
-  const { currentProject, systemStatus, fetchSystemStatus } = useProjectStore();
+  const { currentProject, systemStatus, fetchSystemStatus, offlineAssetIds, openRelinkModal } =
+    useProjectStore();
 
   const [fileName, setFileName] = useState(
     currentProject ? `${currentProject.name}.mp4` : 'mi_video.mp4'
@@ -179,6 +251,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose }) => 
   const [rangeMode, setRangeMode] = useState<'inout' | 'full'>('inout');
   const [useGpu, setUseGpu] = useState<boolean>(true);
   const [isExporting, setIsExporting] = useState(false);
+  const [showOfflineWarning, setShowOfflineWarning] = useState(false);
   const [progressPct, setProgressPct] = useState(0);
   const [exportResult, setExportResult] = useState<{
     outputPath: string;
@@ -199,6 +272,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose }) => 
       setErrorMsg(null);
       setProgressPct(0);
       setIsExporting(false);
+      setShowOfflineWarning(false);
       cancelRequestedRef.current = false;
       activeExportIdRef.current = null;
       if (!outputDir && systemStatus?.paths.exportsDir) {
@@ -234,6 +308,21 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose }) => 
 
   const finalW = outW % 2 === 0 ? outW : outW + 1;
   const finalH = outH % 2 === 0 ? outH : outH + 1;
+
+  const offlineClipsInTimeline = currentProject.clips.filter(
+    (c) => c.assetId && offlineAssetIds.includes(c.assetId)
+  );
+  const uniqueOfflineAssetsCount = new Set(
+    offlineClipsInTimeline.map((c) => c.assetId)
+  ).size;
+
+  const handleExportButtonClick = () => {
+    if (offlineClipsInTimeline.length > 0 && !showOfflineWarning) {
+      setShowOfflineWarning(true);
+      return;
+    }
+    handleStartExport();
+  };
 
   const handleCancelExport = async () => {
     cancelRequestedRef.current = true;
@@ -335,9 +424,16 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose }) => 
 
       const mediaMap = new Map<string, CanvasDrawableSource>();
 
+      const currentOfflineIds = useProjectStore.getState().offlineAssetIds;
+      const hiddenTrackIds = new Set(
+        currentProject.tracks.filter((t) => t.hidden).map((t) => t.id)
+      );
+
       for (const clip of currentProject.clips) {
         if (cancelRequestedRef.current) break;
         if (!clip.assetId || clip.type !== 'image') continue;
+        if (hiddenTrackIds.has(clip.trackId)) continue;
+        if (currentOfflineIds.includes(clip.assetId)) continue;
         const asset: MediaAsset | undefined = currentProject.assets.find(
           (a) => a.id === clip.assetId
         );
@@ -345,7 +441,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose }) => 
 
         const img = new Image();
         img.crossOrigin = 'anonymous';
-        img.src = asset.url;
+        img.src = apiUrl(asset.url);
         await new Promise<void>((resolve) => {
           img.onload = () => resolve();
           img.onerror = () => resolve();
@@ -368,6 +464,10 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose }) => 
       let pendingJpegPromises: Promise<ArrayBuffer>[] = [];
 
       const ensureVideoReaderForClip = async (clip: TimelineClip) => {
+        if (hiddenTrackIds.has(clip.trackId)) return null;
+        if (clip.assetId && useProjectStore.getState().offlineAssetIds.includes(clip.assetId)) {
+          return null;
+        }
         let entry = activeVideoReaders.get(clip.id);
         if (entry) return entry;
 
@@ -397,6 +497,10 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose }) => 
 
         for (const clip of currentProject.clips) {
           if (clip.type !== 'video') continue;
+          if (hiddenTrackIds.has(clip.trackId)) continue;
+          if (clip.assetId && useProjectStore.getState().offlineAssetIds.includes(clip.assetId)) {
+            continue;
+          }
           const clipEnd = clip.startTime + clip.duration;
 
           if (timeSec >= clip.startTime && timeSec <= clipEnd) {
@@ -427,7 +531,8 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose }) => 
           finalH,
           currentProject,
           timeSec,
-          mediaMap
+          mediaMap,
+          useProjectStore.getState().offlineAssetIds
         );
 
         pendingJpegPromises.push(poolItem.encodeToJpegBuffer());
@@ -544,6 +649,19 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose }) => 
         await entry.reader.close();
       }
       activeVideoReaders.clear();
+      const failedExpId = activeExportIdRef.current;
+      if (failedExpId) {
+        activeExportIdRef.current = null;
+        try {
+          await fetch(apiUrl('/api/export/cancel'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ exportId: failedExpId }),
+          });
+        } catch {
+          // ignore cleanup error
+        }
+      }
       if (!cancelRequestedRef.current) {
         setErrorMsg(err?.message || 'Error durante la exportación');
       }
@@ -672,6 +790,65 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose }) => 
                 className="w-full py-2 px-5 rounded-full border border-[#3a3c44] hover:border-gray-500 text-xs font-medium text-gray-300 hover:text-white hover:bg-white/5 transition"
               >
                 Listo
+              </button>
+            </div>
+          </div>
+        ) : showOfflineWarning ? (
+          /* ESTADO 1.5: CONFIRMACIÓN PREVENTIVA DE MEDIOS DESCONECTADOS */
+          <div className="w-full max-w-md rounded-2xl bg-[#202124] border border-amber-500/40 shadow-2xl p-6 space-y-4 animate-in fade-in zoom-in-95 duration-150">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center text-amber-400 shrink-0">
+                <AlertTriangle className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-white">Medios desconectados</h3>
+                <p className="text-xs text-amber-400 font-medium">
+                  {uniqueOfflineAssetsCount} archivo(s) ausente(s) en la línea de tiempo
+                </p>
+              </div>
+            </div>
+
+            <div className="p-3.5 rounded-xl bg-[#18191c] border border-[#2e3036] space-y-2 text-xs text-gray-300">
+              <p>
+                Tu proyecto contiene clips cuyos archivos de origen no se encuentran en el disco.
+              </p>
+              <p className="text-gray-400">
+                Si continúas con la exportación, esas partes aparecerán con la tarjeta técnica{' '}
+                <span className="text-red-400 font-semibold font-mono">"MEDIA OFFLINE"</span> o en silencio.
+              </p>
+            </div>
+
+            <div className="flex flex-col gap-2 pt-2 border-t border-[#2c2d32]">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowOfflineWarning(false);
+                  onClose();
+                  openRelinkModal();
+                }}
+                className="w-full py-2.5 px-4 rounded-xl bg-[#00d4e5] hover:bg-[#19e3f3] text-[#141517] font-semibold text-xs flex items-center justify-center gap-2 shadow transition"
+              >
+                <Link className="w-4 h-4" />
+                Re-vincular archivos ahora
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setShowOfflineWarning(false);
+                  handleStartExport();
+                }}
+                className="w-full py-2 px-4 rounded-xl bg-[#28292e] hover:bg-[#32343a] border border-[#3a3c44] text-gray-200 hover:text-white font-medium text-xs transition"
+              >
+                Exportar de todos modos (Borrador)
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setShowOfflineWarning(false)}
+                className="w-full py-1.5 px-4 text-xs text-gray-400 hover:text-white transition"
+              >
+                Volver a la configuración
               </button>
             </div>
           </div>
@@ -813,6 +990,29 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose }) => 
                 </button>
               </div>
 
+              {/* Offline Clips In Timeline Notice */}
+              {offlineClipsInTimeline.length > 0 && (
+                <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-between gap-3 text-xs">
+                  <div className="flex items-center gap-2.5 text-amber-300 min-w-0">
+                    <AlertTriangle className="w-4 h-4 shrink-0 text-amber-400" />
+                    <span className="truncate">
+                      {uniqueOfflineAssetsCount} archivo(s) desconectado(s) en la línea de tiempo
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onClose();
+                      openRelinkModal();
+                    }}
+                    className="px-2.5 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 text-[11px] font-semibold shrink-0 transition flex items-center gap-1"
+                  >
+                    <Link className="w-3 h-3" />
+                    Re-vincular
+                  </button>
+                </div>
+              )}
+
               {/* Error Alert */}
               {errorMsg && (
                 <div className="p-3 rounded-xl bg-rose-500/15 border border-rose-500/40 text-rose-200">
@@ -832,7 +1032,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose }) => 
               </button>
               <button
                 type="button"
-                onClick={handleStartExport}
+                onClick={handleExportButtonClick}
                 className="px-5 py-2 rounded-xl bg-[#00d4e5] hover:bg-[#19e3f3] text-[#0d0e11] font-semibold text-xs flex items-center gap-1.5 shadow transition"
               >
                 <Download className="w-3.5 h-3.5" />

@@ -27,6 +27,8 @@ import {
   Music,
   Image as ImageIcon,
   Type as TypeIcon,
+  AlertTriangle,
+  Link,
 } from 'lucide-react';
 import { useProjectStore } from '../store/useProjectStore';
 import { apiUrl } from '../config/api';
@@ -109,6 +111,8 @@ export const TimelinePanel: React.FC<{ heightPx?: number }> = ({ heightPx = 270 
     clipboardClips,
     isTimelineCollapsed,
     isMainTrackMagnetic,
+    offlineAssetIds,
+    openRelinkModal,
     selectClip,
     setSelectedClipIds,
     selectAllClips,
@@ -1236,6 +1240,7 @@ export const TimelinePanel: React.FC<{ heightPx?: number }> = ({ heightPx = 270 
                             selectedClip?.linkGroupId &&
                             clip.linkGroupId === selectedClip.linkGroupId;
                           const asset = currentProject.assets.find((a) => a.id === clip.assetId);
+                          const isOffline = clip.assetId ? offlineAssetIds.includes(clip.assetId) : false;
 
                           return (
                             <div
@@ -1248,7 +1253,7 @@ export const TimelinePanel: React.FC<{ heightPx?: number }> = ({ heightPx = 270 
                               style={{
                                 left: `${leftPx}px`,
                                 width: `${widthPx}px`,
-                                ...(clip.type === 'video' && asset?.thumbnail
+                                ...(clip.type === 'video' && asset?.thumbnail && !isOffline
                                   ? {
                                       backgroundImage: `url(${asset.thumbnail})`,
                                       backgroundRepeat: 'repeat-x',
@@ -1258,9 +1263,13 @@ export const TimelinePanel: React.FC<{ heightPx?: number }> = ({ heightPx = 270 
                               }}
                               className={`group absolute top-0.5 bottom-0.5 rounded-lg overflow-hidden cursor-grab active:cursor-grabbing select-none flex flex-col justify-between transition-shadow ${
                                 isSelected
-                                  ? 'ring-2 ring-[#00d4e5] border border-[#00d4e5] z-20 shadow-lg shadow-[#00d4e5]/20'
+                                  ? isOffline
+                                    ? 'ring-2 ring-red-400 border border-red-500 z-20 shadow-lg shadow-red-500/25'
+                                    : 'ring-2 ring-[#00d4e5] border border-[#00d4e5] z-20 shadow-lg shadow-[#00d4e5]/20'
                                   : isLinkedPeer
                                   ? 'ring-1 ring-[#00d4e5]/70 border border-[#00d4e5]/70 z-10'
+                                  : isOffline
+                                  ? 'border border-red-500/80 ring-1 ring-red-500/40'
                                   : `border hover:brightness-125 ${
                                       clip.type === 'audio'
                                         ? 'border-emerald-400/30'
@@ -1271,7 +1280,9 @@ export const TimelinePanel: React.FC<{ heightPx?: number }> = ({ heightPx = 270 
                                         : 'border-blue-400/35'
                                     }`
                               } ${
-                                clip.type === 'text'
+                                isOffline
+                                  ? 'bg-[#38161c]'
+                                  : clip.type === 'text'
                                   ? 'bg-[#d6457a]'
                                   : clip.type === 'audio'
                                   ? 'bg-[#10382b]'
@@ -1332,6 +1343,12 @@ export const TimelinePanel: React.FC<{ heightPx?: number }> = ({ heightPx = 270 
                                       : 'opacity-0 group-hover:opacity-100'
                                   }`}
                                 >
+                                  {isOffline && (
+                                    <span className="inline-flex items-center gap-1 text-[9px] font-semibold text-red-300 bg-red-950/80 px-1 py-0.5 rounded border border-red-500/40 shrink-0">
+                                      <AlertTriangle className="w-2.5 h-2.5 text-red-400" />
+                                      Offline
+                                    </span>
+                                  )}
                                   {clip.linkGroupId && (
                                     <Link2 className="w-2.5 h-2.5 text-[#00d4e5] shrink-0" />
                                   )}
@@ -1468,6 +1485,36 @@ export const TimelinePanel: React.FC<{ heightPx?: number }> = ({ heightPx = 270 
           style={{ left: `${contextMenu.x}px`, top: `${contextMenu.y}px` }}
           className="fixed z-50 w-64 rounded-xl bg-[#202124] border border-[#32343a] shadow-2xl py-1.5 text-xs text-gray-200 select-none"
         >
+          {contextClip.assetId && (
+            <>
+              <button
+                type="button"
+                onClick={() => {
+                  openRelinkModal(contextClip.assetId);
+                  setContextMenu(null);
+                }}
+                className={`w-full px-3.5 py-2 hover:bg-white/10 flex items-center justify-between transition ${
+                  offlineAssetIds.includes(contextClip.assetId)
+                    ? 'text-red-300 bg-red-500/10 hover:bg-red-500/20'
+                    : 'text-[#00d4e5]'
+                }`}
+              >
+                <span className="flex items-center gap-2.5">
+                  <Link className="w-3.5 h-3.5" />
+                  {offlineAssetIds.includes(contextClip.assetId)
+                    ? 'Re-vincular archivo faltante...'
+                    : 'Re-vincular archivo...'}
+                </span>
+                {offlineAssetIds.includes(contextClip.assetId) && (
+                  <span className="px-1.5 py-0.5 rounded bg-red-950/70 border border-red-500/40 text-[9px] font-semibold text-red-300">
+                    Offline
+                  </span>
+                )}
+              </button>
+              <div className="my-1 border-t border-[#2e3036]" />
+            </>
+          )}
+
           <button
             type="button"
             onClick={() => {

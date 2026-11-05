@@ -4,17 +4,30 @@ Este documento especifica la arquitectura técnica, modelo de datos, motor de in
 
 ---
 
+## Estado verificado — 2026-11-04
+
+Inspección estática del árbol de trabajo con HEAD `4564f63`, incluidos cambios locales; sin ejecutar pruebas ni compilaciones. Se conservan los objetivos y el registro histórico de etapas. Su declaración anterior de “100%” y los resultados numéricos no constituyen validación vigente.
+
+- **Implementado:** tipos para `x`, `y`, `scale`, `rotation`, `opacity` y `volume`; cinco interpolaciones y búsqueda binaria para más de 16 puntos en `src/lib/keyframeEngine.ts`; acciones del store, controles del inspector, gizmo, marcadores y envolvente SVG. El paneo pertenece a la visión original y no está implementado en `AnimatableProperty`.
+- **Implementado:** preview de audio mediante `new Audio(...)` y actualización de `HTMLAudioElement.volume` en `CanvasPreviewStage.tsx`; exportación mediante expresiones de FFmpeg. La referencia histórica a Web Audio no describe el mecanismo actual. No se ha medido una frecuencia efectiva de 60 FPS.
+- **Parcialmente implementado:** split copia los keyframes sin reajustar los del fragmento derecho; trim no reconcilia sus límites. `ExportModal.tsx` desplaza y filtra puntos de volumen en el rango I/O, pudiendo perder puntos que determinan la interpolación dentro del rango. Las tolerancias de 33 ms son fijas, no equivalen a un fotograma para todos los FPS.
+- **Pendiente:** arrastre horizontal y eliminación con `Supr` de los marcadores visuales de `ClipKeyframeMarkers.tsx`. Actualmente el clic selecciona el clip y salta al tiempo del marcador. Esto se distingue de los controles del inspector y de la envolvente de audio.
+- **Riesgos identificados mediante inspección estática:** respuestas de persistencia antiguas pueden reemplazar ediciones posteriores; la cobertura de snapshots depende del control utilizado. Preview limita volumen a 1 y aplica crossfade de solapamiento, mientras la exportación no reproduce uniformemente esas reglas. Compartir compositor no garantiza por sí solo fidelidad de todo el flujo.
+- **Resultados históricos no revalidados:** existen los seis scripts de etapas citados abajo. No se ejecutaron. El bloque de interacción con store de `verify_keyframes_stage6.ts` llama a inserción sin preparar un proyecto y comprueba después el playhead, por lo que no demuestra esa inserción. Los conteos históricos se conservan sin certificar cobertura integral.
+
+Referencias: [contexto vigente](../CONTEXTO_PROYECTO.md) y [auditoría estática](audits/AUDITORIA_TECNICA_2026-11-04.md).
+
 ## 1. Visión y Principios de Diseño
 
 1. **Abstracción Matemática Unificada:**
    Tanto en video (*posición X/Y, escala, rotación, opacidad*) como en audio (*volumen, paneo*), un keyframe responde al mismo principio: **el valor de una propiedad en un punto temporal determinado, con una regla de interpolación entre puntos contiguos**.
 2. **Coordenadas de Tiempo Relativas al Clip (`timeOffset`):**
-   Los keyframes se almacenan siempre en segundos relativos al inicio del clip (`0 <= timeOffset <= clip.duration`).
+   Los keyframes se almacenan en segundos relativos al inicio del clip; el diseño exige `0 <= timeOffset <= clip.duration`, pero split y trim no mantienen uniformemente ese límite.
    * *Ventaja crucial:* Al mover o desplazar un clip en la línea de tiempo, o reordenar pistas, la animación viaja con el clip de forma inmutable, sin requerir recomputar la base de datos.
 3. **Cero Impacto en Proyectos Existentes:**
    Si un clip no tiene keyframes definidos para una propiedad, el sistema utiliza el valor estático por defecto (`clip.transform.*`, `clip.volume`).
 4. **Rendimiento de Grado Profesional:**
-   El motor de interpolación se implementa como función pura de cálculo sub-microsegundo (cero asignación de memoria en el ciclo de renderizado a 60/120 FPS).
+   El objetivo original es evaluación pura de cálculo sub-microsegundo, sin asignaciones en el ciclo a 60/120 FPS. Estas cifras no se han revalidado mediante mediciones.
 
 ---
 
@@ -55,7 +68,7 @@ export interface TimelineClip {
 
 ## 3. Motor Matemático de Interpolación (`src/lib/keyframeEngine.ts`)
 
-La evaluación temporal se ejecuta mediante la función pura `evaluatePropertyAtTime`:
+La evaluación temporal se ejecuta mediante la función pura `evaluatePropertyAtTime`. El siguiente fragmento conserva la explicación simplificada original; la implementación vigente también maneja un único punto y usa búsqueda binaria para listas de más de 16 puntos:
 
 ```typescript
 export function evaluatePropertyAtTime(
@@ -123,7 +136,7 @@ const tf = {
   flipX: clip.transform.flipX,
 };
 ```
-* **Exportación MP4:** Como el motor de exportación utiliza este mismo compositor fotograma a fotograma, las animaciones de escala, zoom, posición y opacidad se exportan a 1080p con 100% de fidelidad visual sin requerir modificaciones en el backend.
+* **Exportación MP4:** Como el motor de exportación utiliza este mismo compositor fotograma a fotograma, las transformaciones animadas se evalúan en el compositor compartido. La fidelidad completa es un objetivo; existen límites de integración temporal y exportación descritos en el estado verificado.
 
 ### 4.2. Audio en Tiempo Real y Exportación FFmpeg
 1. **Previsualización en Vivo:**
@@ -134,7 +147,7 @@ const tf = {
    aud.volume = Math.max(0, Math.min(1, keyframeVol * fadeFactor * ovFactor));
    ```
 2. **Exportación con FFmpeg (`server/mediaBackendPlugin.ts`):**
-   Si el clip contiene keyframes de volumen, el filtro estático `volume=X` se construye dinámicamente como expresión matemática por tramos temporales con `volume=eval=frame:volume='...'`, garantizando que las automatizaciones de volumen queden fielmente grabadas en el archivo `.mp4` final.
+   Si el clip contiene keyframes de volumen, el filtro estático `volume=X` se construye dinámicamente como expresión matemática por tramos temporales con `volume=eval=frame:volume='...'`, con el objetivo de conservar la automatización. La conservación de curvas en rangos I/O y la recuperación de errores de mezcla presentan limitaciones.
 
 ---
 
@@ -151,7 +164,7 @@ Cada propiedad animable cuenta con un bloque de control de keyframes:
 
 ### 5.2. En la Línea de Tiempo (`TimelinePanel.tsx`)
 * Al seleccionar un clip con keyframes, se renderizan pequeños rombos cian (`◆`) sobre la pista del clip a la altura de su `startTime + timeOffset`.
-* Los rombos pueden ser seleccionados, arrastrados horizontalmente para ajustar el *timing* o eliminados con la tecla `Supr`.
+* **Objetivo original pendiente para los marcadores visuales:** arrastrar horizontalmente para ajustar el *timing* y eliminar nodos con `Supr`. El clic implementado selecciona el clip y posiciona el cabezal.
 * En clips de audio, se dibuja la curva de volumen continua sobre la forma de onda (*volume envelope*).
 
 ---
@@ -159,7 +172,7 @@ Cada propiedad animable cuenta con un bloque de control de keyframes:
 ## 6. Acciones en el Store Central (`useProjectStore.ts`)
 
 ```typescript
-// Métodos a incorporar en useProjectStore:
+// Métodos actualmente presentes en useProjectStore:
 
 setClipKeyframe: (
   clipId: string,
@@ -183,38 +196,40 @@ clearClipKeyframes: (
 
 ---
 
-## 7. Registro de Implementación por Etapas (Completadas al 100%)
+## 7. Registro histórico de Implementación por Etapas
 
-1. **Etapa 1: Tipos, Motor Matemático y Suite de Pruebas Unitarias** — *[COMPLETADA]*
+Las etapas se declararon originalmente completadas al 100%. Se conservan las marcas y resultados como antecedentes no revalidados; el estado vigente y sus pendientes se detallan al inicio.
+
+1. **Etapa 1: Tipos, Motor Matemático y Suite de Pruebas Unitarias** — *[COMPLETADA según registro histórico; no revalidada]*
    * Creación de tipos en `src/types/project.ts` (`InterpolationType`, `AnimatableProperty`, `Keyframe`, `ClipKeyframes`).
    * Motor `src/lib/keyframeEngine.ts` con soporte completo para `linear`, `ease-in-out` (SmoothStep), `ease-in`, `ease-out`, `hold` y optimización con búsqueda binaria $O(\log N)$ para listas de keyframes >16.
    * Suite de pruebas `scripts/verify_keyframes_stage1.ts` (6/6 pruebas aprobadas).
 
-2. **Etapa 2: Acciones en Zustand Store e Historial Deshacer/Rehacer** — *[COMPLETADA]*
+2. **Etapa 2: Acciones en Zustand Store e Historial Deshacer/Rehacer** — *[COMPLETADA según registro histórico; no revalidada]*
    * Implementación de `setClipKeyframe`, `removeClipKeyframe` y `clearClipKeyframes` en `src/store/useProjectStore.ts`.
    * Deduplicación y actualización in-place con ventana de tolerancia de 33ms (1 frame a 30 FPS) y ordenamiento cronológico garantizado.
    * Integración con la pila de Undo/Redo (`Ctrl+Z` / `Ctrl+Y`) mediante `commitProjectUpdate`.
    * Suite de pruebas `scripts/verify_keyframes_stage2.ts` (7/7 pruebas aprobadas).
 
-3. **Etapa 3: Integración en Canvas 2D y Gizmo con Auto-Keyframing** — *[COMPLETADA]*
+3. **Etapa 3: Integración en Canvas 2D y Gizmo con Auto-Keyframing** — *[COMPLETADA según registro histórico; no revalidada]*
    * Conexión dinámica de `evaluatePropertyAtTime` en `drawSingleClipToContext` y `renderProjectFrameToCanvas` en `CanvasPreviewStage.tsx`.
    * Exportación MP4 a 1080p en `ExportModal.tsx` con soporte nativo de transformaciones animadas.
    * Auto-Keyframing inteligente en `updateClipTransformLive` para mover, escalar y rotar con el Gizmo visual insertando automáticamente keyframes si la propiedad ya está animada.
    * Suite de pruebas `scripts/verify_keyframes_stage3.ts` (5/5 pruebas aprobadas).
 
-4. **Etapa 4: Pipeline Acústico de Audio en Vivo y Exportación FFmpeg** — *[COMPLETADA]*
-   * Evaluación de volumen a 60 FPS en Web Audio dentro de `CanvasPreviewStage.tsx`.
+4. **Etapa 4: Pipeline Acústico de Audio en Vivo y Exportación FFmpeg** — *[COMPLETADA según registro histórico; no revalidada]*
+   * Registro original: evaluación de volumen a 60 FPS en Web Audio. Contraste actual: elementos HTML de audio sincronizados con el playhead; frecuencia efectiva no medida.
    * Generador de expresiones matemáticas de volumen de FFmpeg `buildFFmpegVolumeExpression` con protección `isnan(t)` en `keyframeEngine.ts`.
    * Integración en el backend `mediaBackendPlugin.ts` con filtros `volume=eval=frame:volume='...'` y sincronización con puntos In/Out en `ExportModal.tsx`.
    * Suite de pruebas `scripts/verify_keyframes_stage4.ts` con renderizado de audio real mediante FFmpeg y análisis espectral (4/4 pruebas aprobadas).
 
-5. **Etapa 5: Controles Profesionales en el Inspector (UI)** — *[COMPLETADA]*
+5. **Etapa 5: Controles Profesionales en el Inspector (UI)** — *[COMPLETADA según registro histórico; no revalidada]*
    * Componente reutilizable `KeyframeControlGroup.tsx` con navegación temporal rápida (`‹` y `›`), rombo interactivo reactivo (`◇` inactivo / `◆` activo con resplandor cian) y soporte para propiedades simples o duales (Posición X/Y).
    * Integración en `TransformSection.tsx` (Opacidad, Escala, Posición X/Y, Rotación) y en `AudioInspector.tsx` (Volumen).
    * Evaluación de valores interpolados en vivo en sliders y cajas numéricas durante el desplazamiento del cabezal.
    * Suite de pruebas `scripts/verify_keyframes_stage5.ts` (5/5 pruebas aprobadas).
 
-6. **Etapa 6: Marcadores en Timeline y Envolvente Rubber-Band para Audio** — *[COMPLETADA]*
+6. **Etapa 6: Marcadores en Timeline y Envolvente Rubber-Band para Audio** — *[COMPLETADA según registro histórico; no revalidada]*
    * Componente `ClipKeyframeMarkers.tsx` en `TimelinePanel.tsx`: renderizado de rombos cian (`◆`) en posiciones temporales exactas, resaltado brillante al coincidir con el cabezal de reproducción y clic directo para posicionar el cabezal en el keyframe.
    * Componente `VolumeRubberBand.tsx`: curva continua de envolvente de volumen en SVG con polígono de sombreado sobre la forma de onda de audio de alta resolución, nodos romboidales en keyframes y creación por doble clic sobre la envolvente.
    * Suite de pruebas `scripts/verify_keyframes_stage6.ts` (6/6 pruebas aprobadas).

@@ -1,8 +1,22 @@
 # Documento de Contexto del Proyecto: VOSTOK EDITOR para Linux
 
-Este documento sirve como la fuente única de verdad (*Single Source of Truth*) sobre los objetivos, decisiones de arquitectura, reglas de negocio, diseño de interfaz y estado actual del proyecto.
+Este documento reúne la documentación contextual del estado del proyecto, contrastable con el código y la configuración vigente, junto con sus objetivos, decisiones de arquitectura, reglas de negocio y antecedentes de diseño.
 
 ---
+
+## Estado verificado — 2026-11-04
+
+Inspección estática del árbol de trabajo con HEAD `4564f63`, incluidos cambios locales. No se ejecutaron pruebas ni compilaciones. “Implementado” indica presencia en el código; los riesgos descritos no se han reproducido en esta revisión. Los resultados y declaraciones de cierre anteriores se conservan como antecedentes, no como validación del estado vigente.
+
+- **Implementado:** React/TypeScript y Zustand gestionan edición y estado; Canvas 2D comparte composición entre preview y exportación; Node ejecuta FFmpeg/FFprobe. Rust inicia el servidor y gestiona parcialmente su ciclo de vida. La edición utiliza HTTP, sin comandos IPC de dominio registrados en el Rust inspeccionado.
+- **Implementado con límites arquitectónicos:** `src/config/api.ts` dirige Tauri a `http://127.0.0.1:45173` y el navegador al middleware de Vite. `server/standaloneServer.ts` ofrece `/health`, pero `src-tauri/src/lib.rs` solo comprueba una conexión TCP para considerar activo el backend. Requiere Node instalado; el bundle ESM se distribuye como recurso. No hay handshake de identidad ni supervisión completa de los procesos FFmpeg.
+- **Riesgos de persistencia e integridad:** `useProjectStore.ts` mantiene hasta 50 snapshots en memoria, pero algunas transformaciones persisten sin snapshot y respuestas de guardado antiguas pueden reemplazar ediciones posteriores. El backend escribe directamente `project.json` en `~/.local/share/video-editor/projects/<id>/`; no implementa reemplazo atómico ni validación estructural completa. El DELETE con ID saneado vacío puede resolver a la raíz de proyectos. Reimportar por ruta genera IDs nuevos sin remapear los clips existentes. La importación por buffer y los trabajos temporales comparten caché; limpiarla puede retirar medios referenciados.
+- **Limitaciones de acceso local:** `mediaBackendPlugin.ts` permite CORS `*`, no autentica las peticiones y sirve rutas suministradas por el cliente; Tauri configura `csp: null`. Escuchar en loopback limita la exposición de red, pero no autentica al cliente. No se ha probado explotación.
+- **Funcionalidades parciales:** las curvas no se reajustan correctamente en split/trim y el filtrado de keyframes de volumen por rango I/O puede alterar la interpolación. El inspector ofrece identificadores de transición distintos de los reconocidos por el compositor. El audio del inspector de video no resuelve su clip de audio vinculado; preview y exportación difieren en ganancia y crossfade. El pegado agrupa selecciones independientes y no transfiere sus assets entre proyectos.
+- **Exportación parcial y riesgos estáticos:** `ExportModal.tsx` carga imágenes con URL sin el resolvedor de API usado en preview; intenta decodificar videos offline y de pistas ocultas; reducir a 720p no escala uniformemente texto y posiciones. El fallback del pipe binario carece de los JPEG que requiere la ruta tradicional. El backend puede terminar sin audio tras un fallo de mezcla y devolver éxito. Cancelación, limpieza y espera de procesos tienen cobertura incompleta. Estos mecanismos limitan las garantías de fidelidad y recuperación.
+- **Pendiente / no revalidado:** detección de medios en caliente, revalidación antes de exportar, compatibilidad de reemplazos e invalidación de fuentes ya cargadas. No se han revalidado latencias, aceleración efectiva, FPS ni los resultados históricos de pruebas. Los scripts existentes no equivalen a una suite E2E completa.
+
+La [auditoría técnica](docs/audits/AUDITORIA_TECNICA_2026-11-04.md) conserva el detalle de los hallazgos. Este resumen no sustituye ese inventario ni constituye un plan de mejoras.
 
 ## 1. Visión y Propósito del Proyecto
 
@@ -11,7 +25,7 @@ Este documento sirve como la fuente única de verdad (*Single Source of Truth*) 
 * **Filosofía de Producto:**
   1. **Simplicidad e Inmediatez:** Interfaz intuitiva inspirada en flujos de trabajo modernos de edición ágil y no lineal (*Sony Vegas/Reaper*), enfocada en las herramientas esenciales de edición rápida.
   2. **Desarrollo Ágil en Vivo (*Hot Reload*):** Arquitectura pensada para visualizar y ajustar la interfaz y herramientas inmediatamente en el navegador durante el desarrollo, y empaquetarse como aplicación de escritorio para Linux.
-  3. **Rendimiento Robusto sin Basura en Disco:** Referencia los archivos originales en su ruta local sin duplicarlos y utiliza una política estricta de **caché efímera autolimpiable**.
+  3. **Rendimiento Robusto sin Basura en Disco:** Prioriza referencias a originales por ruta y caché efímera. La alternativa de importación por buffer sí copia el archivo a caché; la separación entre medios persistentes y temporales está pendiente.
 
 ---
 
@@ -21,7 +35,7 @@ Este documento sirve como la fuente única de verdad (*Single Source of Truth*) 
 * **Framework UI:** **React + TypeScript + Vite** ([`src/App.tsx`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/src/App.tsx)).
 * **Tipografía UI Oficial:** **`TikTok Sans Variable`** integrada mediante `@fontsource-variable/tiktok-sans` tanto en el sistema CSS como en Tailwind para máxima legibilidad moderna en tema oscuro.
 * **Estilos & Layout Adaptable:** **TailwindCSS** + **Lucide Icons** con **Paneles Redimensionables (Splitters)** verticales y horizontales y escalado matemático dinámico con `ResizeObserver` para preservar siempre la proporción exacta del lienzo.
-* **Gestión de Estado e Historial:** **Zustand** ([`src/store/useProjectStore.ts`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/src/store/useProjectStore.ts)) con pila de historial `pastProjects` / `futureProjects` (hasta 50 pasos) para soporte nativo de `Ctrl+Z` y `Ctrl+Y` y autoguardado automático en disco.
+* **Gestión de Estado e Historial:** **Zustand** ([`src/store/useProjectStore.ts`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/src/store/useProjectStore.ts)) con pila de historial `pastProjects` / `futureProjects` (hasta 50 pasos) para soporte nativo de `Ctrl+Z` y `Ctrl+Y` y autoguardado automático en disco, con las limitaciones de cobertura y concurrencia indicadas en el estado verificado.
 * **Arquitectura Modular del Inspector ([`src/components/inspector/`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/src/components/inspector/)):**
   * Modularización de `EditorWorkspace.tsx` separando responsabilidades en submódulos especializados:
     * [`InspectorPanel.tsx`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/src/components/inspector/InspectorPanel.tsx): Contenedor contextual flotante con pestañas inteligentes según el tipo de clip seleccionado.
@@ -37,15 +51,15 @@ Este documento sirve como la fuente única de verdad (*Single Source of Truth*) 
 
 ### 2.2. Capa Backend Local / Nativa (Linux + FFmpeg)
 * **Puente Multimedia Local ([`server/mediaBackendPlugin.ts`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/server/mediaBackendPlugin.ts)):**
-  * Conecta el frontend directamente con `/usr/bin/ffmpeg` y `/usr/bin/ffprobe`.
+  * Ejecuta `ffmpeg` y `ffprobe` mediante procesos Node, resueltos por el `PATH`.
   * **Explorador del Sistema de Archivos (`/api/fs/browse`):** Permite navegar carpetas locales de Linux (`~/Vídeos`, `~/Música`, `~/Imágenes`, `~/Descargas`, etc.) en [`src/components/LocalFileBrowserModal.tsx`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/src/components/LocalFileBrowserModal.tsx).
   * **Streaming sin Copiar Archivos (`/api/media/stream`):** Sirve los archivos multimedia originales mediante *HTTP Range Requests* sin duplicarlos en disco.
   * **Inspección y Ondas (`/api/media/probe`):** Extrae duración, dimensiones, presencia de pista de audio, miniatura en base64 y picos de onda de audio (`waveform`).
-  * **Pipeline de Exportación MP4 (`/api/export/start`, `/api/export/frames`, `/api/export/finalize`):** Recibe los fotogramas compuestos del Canvas, mezcla las pistas de audio activas con sus recortes (`atrim`), volúmenes, `afade` y desfases (`adelay`), codifica el `.mp4` (`libx264` + `aac`) en `~/.local/share/video-editor/exports/` y autolimpia los fotogramas temporales al terminar.
+  * **Pipeline de Exportación MP4 (`/api/export/start`, `/api/export/frames`, `/api/export/finalize`):** Recibe los fotogramas compuestos del Canvas, mezcla las pistas de audio activas con sus recortes (`atrim`), volúmenes, `afade` y desfases (`adelay`), codifica el `.mp4` (`h264_vaapi` o `libx264`, más `aac` cuando la mezcla de audio finaliza correctamente) en `~/.local/share/video-editor/exports/` y limpia los temporales tras una finalización correcta; la recuperación y limpieza ante errores tienen cobertura incompleta.
 
 ### 2.3. Capa de Escritorio Nativa (Tauri v2 + Standalone Node Server + WebKitGTK)
-* **Tauri v2 ([`src-tauri/`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/src-tauri/)):** Empaqueta la aplicación como binario nativo de escritorio para Linux, utilizando WebKitGTK como motor de visualización con consumo mínimo de memoria RAM y arranque ultra rápido.
-* **Servidor Independiente ESM ([`server/standaloneServer.ts`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/server/standaloneServer.ts) $\rightarrow$ `dist-server/index.mjs`):** Empaquetado ultrarrápido con `esbuild` en formato ESM autónomo que levanta los servicios locales de streaming, probe y codificación FFmpeg tanto en modo desarrollo de escritorio (`npm run desktop:dev`) como en producción (`npm run desktop:build`).
+* **Tauri v2 ([`src-tauri/`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/src-tauri/)):** Empaqueta la aplicación como binario nativo de escritorio para Linux, utilizando WebKitGTK como motor de visualización con consumo y latencia de arranque no medidos en esta revisión.
+* **Servidor Independiente ESM ([`server/standaloneServer.ts`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/server/standaloneServer.ts) $\rightarrow$ `dist-server/index.mjs`):** Empaquetado con `esbuild` en formato ESM autónomo que levanta los servicios locales de streaming, probe y codificación FFmpeg tanto en modo desarrollo de escritorio (`npm run desktop:dev`) como en producción (`npm run desktop:build`).
 * **Arquitectura de Arrastre Universal ([`src/lib/timelineDrop.ts`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/src/lib/timelineDrop.ts)):** Abstracción matemática desacoplada de la API de Drag & Drop de HTML5 (la cual presenta inconsistencias en WebKitGTK), manejando eventos nativos de ratón con resolución precisa de destinos de pistas y solapamiento.
 
 ---
@@ -129,7 +143,7 @@ Este documento sirve como la fuente única de verdad (*Single Source of Truth*) 
       * **Audio:** Se apila **hacia abajo** (Pista Audio 1, 2, 3...) permitiendo mezclas simultáneas de locución, música de fondo y efectos de sonido.
 * **Protección de la Pista Principal Magnética ([`getMainVideoTrack`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/src/store/useProjectStore.ts#L131)):** Identifica siempre la pista base (`Pista Video 1`) para el empaquetado secuencial magnético sin afectar las pistas superiores de superposición.
 * **Vínculo Híbrido Video + Audio (`linkGroupId`):** Al arrastrar un video con sonido se crean las pistas de video y audio agrupadas. Pueden separarse o revincularse en cualquier momento con el botón **Separar/Vincular Audio**, clic derecho o `Ctrl+L`.
-* **Fundidos y Transiciones por Solapamiento:** Al arrastrar un Clip B sobre el final de un Clip A en la misma pista se crea automáticamente la zona de cruce `(X)` con selector de transición (*Crossfade*, *Dip to Black*, *Wipe Left/Right*, *Slide*, *Zoom*).
+* **Fundidos y Transiciones por Solapamiento:** Al arrastrar un Clip B sobre el final de un Clip A en la misma pista se crea automáticamente la zona de cruce `(X)` con selector de transición. El inspector y el compositor usan identificadores incompatibles para algunas opciones (por ejemplo, `dipToBlack` frente a `fade-black`); la funcionalidad está parcialmente implementada.
 * **Redimensionamiento Elástico de Medios Estáticos (Imágenes y Textos):** Los clips de imagen se insertan con una duración inicial estándar de 5 segundos pero no poseen límite artificial `maxDuration`. Al arrastrar sus manijas laterales (`|`), pueden estirarse o encogerse libremente en el timeline (hacia la derecha o hacia la izquierda) hasta un mínimo de seguridad de `0.4s` y un máximo de hasta 24 horas, con preservación de `sourceStart = 0` y compatibilidad nativa tanto en previsualización de Canvas como en exportación FFmpeg.
 * **Marcadores de Entrada (`I`) y Salida (`O`):**
   * Atajos `I` (Entrada), `O` (Salida) y `Alt+X` (Limpiar rango), además de banderines arrastrables en la regla de tiempo.
@@ -139,7 +153,14 @@ Este documento sirve como la fuente única de verdad (*Single Source of Truth*) 
 * Auto-ajuste matemático del lienzo (`ResizeObserver` + `contain`) para mantener siempre la relación de aspecto exacta mientras se redimensionan los paneles laterales o la línea de tiempo.
 * **Gizmo Interactivo:** Mover en $(X, Y)$ con guías magnéticas de centrado, escalar desde las 4 esquinas y rotar desde el tirador superior.
 
-### 3.5. Atajos de Teclado Activos
+### 3.5. Sistema de Integridad de Medios y Re-vinculación Inteligente (Media Offline & Relink Engine)
+* **Detección Asíncrona No Bloqueante:** Comprobación asíncrona al abrir proyectos y reescaneo manual (`/api/media/check-status`) que actualiza `offlineAssetIds`; detección en caliente pendiente.
+* **Apertura Asistida al Cargar Proyecto:** Si al abrir un proyecto se detectan archivos movidos o eliminados, se abre automáticamente el modal de re-vinculación.
+* **Renderizado Técnico "MEDIA OFFLINE":** Los clips desconectados dibujan una tarjeta técnica en Canvas 2D preservando posición espacial, rotación y escala.
+* **Re-vinculación en Cascada con Explorador Interno:** Utiliza [`LocalFileBrowserModal.tsx`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/src/components/LocalFileBrowserModal.tsx) pre-posicionado en el directorio original e intenta revincular otros assets ya marcados offline por coincidencia de `asset.name` en la carpeta elegida.
+* **Prevención en Exportación:** Alerta antes de codificar con FFmpeg si existen clips offline en la línea de tiempo, permitiendo solicitar revinculación o borrador; el borrador con video ausente presenta las limitaciones descritas arriba.
+
+### 3.6. Atajos de Teclado Activos
 * `Espacio`: Play / Pausa.
 * `I` / `O` / `Alt + X`: Marcar Entrada (In), Marcar Salida (Out) y Limpiar rango I/O.
 * `S` o `Ctrl + B`: Dividir (*Split*) clip en la posición de la aguja.
@@ -159,18 +180,21 @@ Este documento sirve como la fuente única de verdad (*Single Source of Truth*) 
 
 ## 4. Estado de la Hoja de Ruta
 
-- [x] **Fase 1:** Base del Proyecto, Servidor Multimedia Local (FFmpeg) y Gestión de Proyectos. *(Completada)*
-- [x] **Fase 2:** Biblioteca de Medios, Explorador de Archivos Linux, Generador de Textos e Historial Undo/Redo. *(Completada)*
-- [x] **Fase 3:** Línea de Tiempo Multipista, Clips Vinculados (`linkGroupId`), Split/Trim y Solapamientos (Crossfades). *(Completada)*
-- [x] **Fase 4:** Motor de Previsualización Canvas Unificado, Gizmo Interactivo, Paneles Redimensionables, Rango `I/O` y Exportación MP4. *(Completada)*
-- [x] **Fase 5:** Rediseño UX/UI Moderno y Minimalista (Estética Carbón/Cian, Pistas Dinámicas sin Pistas por Defecto, Paneles Colapsables y Flotantes, Menú Contextual de Clic Derecho y Modo Pantalla Completa). *(Completada)*
-- [x] **Fase 6:** Inspector Modular Contextual, Tipografía Variable Avanzada, Escala de Video (5-32) y Asignación de Pistas sin Colisiones. *(Completada)*
-- [x] **Fase 7:** Integración Nativa de Escritorio con Tauri v2 y Standalone Node Server para Linux. *(Completada)*
-- [x] **Fase 8:** Selección Múltiple y Operaciones en Lote en la Línea de Tiempo (Marquee Box, Arrastre Sincronizado y Z-Index WebKitGTK). *(Completada)*
-- [x] **Fase 9:** Selección Múltiple, Arrastre en Pila e Inserción Secuencial en la Biblioteca de Medios. *(Completada)*
-- [x] **Fase 10:** Optimización de Rendimiento y Renderizado Cero-Costo para WebKitGTK en Linux (RAF Throttling, Caché de Bounding Rects y Eliminación de Layout Thrashing). *(Completada)*
-- [x] **Fase 11:** Sistema Universal de Keyframes para Video y Audio (Ver especificación detallada en [`FASE_11.md`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/FASE_11.md)). *(Completada)*
-- [x] **Fase 12:** Visualización de Formas de Onda de Audio de Alta Definición en Línea de Tiempo (Ver especificación detallada en [`FASE_12.md`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/FASE_12.md)). *(Completada)*
+Las marcas siguientes conservan el registro histórico de entregas. No certifican cierre funcional actual: fases 1–4, 6–8, 11 y 13 presentan limitaciones relevantes descritas arriba; fases 10 y 12 incluyen optimizaciones implementadas sin garantías de rendimiento revalidadas.
+
+- [x] **Fase 1:** Base del Proyecto, Servidor Multimedia Local (FFmpeg) y Gestión de Proyectos. *(Entrega registrada históricamente; véase el estado verificado)*
+- [x] **Fase 2:** Biblioteca de Medios, Explorador de Archivos Linux, Generador de Textos e Historial Undo/Redo. *(Entrega registrada históricamente; véase el estado verificado)*
+- [x] **Fase 3:** Línea de Tiempo Multipista, Clips Vinculados (`linkGroupId`), Split/Trim y Solapamientos (Crossfades). *(Entrega registrada históricamente; véase el estado verificado)*
+- [x] **Fase 4:** Motor de Previsualización Canvas Unificado, Gizmo Interactivo, Paneles Redimensionables, Rango `I/O` y Exportación MP4. *(Entrega registrada históricamente; véase el estado verificado)*
+- [x] **Fase 5:** Rediseño UX/UI Moderno y Minimalista (Estética Carbón/Cian, Pistas Dinámicas sin Pistas por Defecto, Paneles Colapsables y Flotantes, Menú Contextual de Clic Derecho y Modo Pantalla Completa). *(Entrega registrada históricamente; véase el estado verificado)*
+- [x] **Fase 6:** Inspector Modular Contextual, Tipografía Variable Avanzada, Escala de Video (5-32) y Asignación de Pistas sin Colisiones. *(Entrega registrada históricamente; véase el estado verificado)*
+- [x] **Fase 7:** Integración Nativa de Escritorio con Tauri v2 y Standalone Node Server para Linux. *(Entrega registrada históricamente; véase el estado verificado)*
+- [x] **Fase 8:** Selección Múltiple y Operaciones en Lote en la Línea de Tiempo (Marquee Box, Arrastre Sincronizado y Z-Index WebKitGTK). *(Entrega registrada históricamente; véase el estado verificado)*
+- [x] **Fase 9:** Selección Múltiple, Arrastre en Pila e Inserción Secuencial en la Biblioteca de Medios. *(Entrega registrada históricamente; véase el estado verificado)*
+- [x] **Fase 10:** Optimización de Rendimiento y Renderizado Cero-Costo para WebKitGTK en Linux (RAF Throttling, Caché de Bounding Rects y Eliminación de Layout Thrashing). *(Entrega registrada históricamente; véase el estado verificado)*
+- [x] **Fase 11:** Sistema Universal de Keyframes para Video y Audio (Ver especificación detallada en [`docs/FASE_11.md`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/docs/FASE_11.md)). *(Entrega registrada históricamente; véase el estado verificado)*
+- [x] **Fase 12:** Visualización de Formas de Onda de Audio de Alta Definición en Línea de Tiempo (Ver especificación detallada en [`docs/FASE_12.md`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/docs/FASE_12.md)). *(Entrega registrada históricamente; véase el estado verificado)*
+- [x] **Fase 13:** Detección de Media Offline, Advertencia Visual en Canvas/Timeline y Herramienta de Re-vinculación Inteligente (Ver especificación detallada en [`docs/FASE_13.md`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/docs/FASE_13.md)). *(Entrega registrada históricamente; véase el estado verificado)*
 
 ---
 
@@ -214,12 +238,12 @@ Este documento sirve como la fuente única de verdad (*Single Source of Truth*) 
   * Cerrado por defecto cuando no hay ningún clip seleccionado.
   * Al seleccionar un clip, se abre como una **tarjeta flotante superpuesta (`position: absolute`)** sobre el extremo derecho del escenario central sin empujar ni redimensionar el lienzo de video (`<canvas>`), con botón **`×`** para cerrarla y un **mini riel vertical de pestañas con íconos a la derecha** (`Básico`, `Audio`, `Velocidad`, `Transición`) junto con controles limpios (`slider` + caja numérica con `%`).
 * **Exportación Nativa sin `<video>` HTML5 (Decodificación Secuencial FFmpeg + Pipe a GPU `AMD VAAPI` + `ITU-R BT.709` + `H.264 High Profile` + Audio `48 kHz`):**
-  * **Eliminación del "Seek Penalty" de HTML5:** Durante la exportación no se usa `<video>.currentTime`. El endpoint `/api/export/decode-clip-frames` decodifica cada clip de forma lineal y secuencial mediante FFmpeg (`image2pipe`), entregando fotogramas continuos como `ImageBitmap` en VRAM (`SequentialVideoFrameReader`) al compositor [`renderProjectFrameToCanvas`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/src/components/CanvasPreviewStage.tsx#L149) (conservando 100% de fidelidad visual en transiciones, capas superpuestas, rotaciones y textos).
+  * **Eliminación del "Seek Penalty" de HTML5:** Durante la exportación no se usa `<video>.currentTime`. El endpoint `/api/export/decode-clip-frames` decodifica cada clip de forma lineal y secuencial mediante FFmpeg (`image2pipe`), entregando fotogramas continuos como `ImageBitmap` en VRAM (`SequentialVideoFrameReader`) al compositor [`renderProjectFrameToCanvas`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/src/components/CanvasPreviewStage.tsx#L149) (reutilizando el compositor, con las limitaciones de fidelidad descritas en el estado verificado).
   * **Codificación Paralela con Pool de `OffscreenCanvas` y Stream Binario (`application/octet-stream`) al Pipe de GPU (`stdin -> image2pipe -> h264_vaapi`):**
-    * En [ExportModal.tsx](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/src/components/ExportModal.tsx), un pool de `OffscreenCanvas` comprime lotes de fotogramas a JPEG binario en paralelo (`convertToBlob` asíncrono multi-hilo, sin conversión a texto Base64 ni `JSON.stringify`) y actualiza la UI una sola vez por lote.
-    * En [mediaBackendPlugin.ts](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/server/mediaBackendPlugin.ts), `/api/export/frames` recibe el bloque binario crudo y lo inyecta directamente al pipe `stdin` del proceso `ffmpeg` acelerado por GPU (`/dev/dri/renderD128` con *fallback* automático a `libx264`), sin escribir miles de archivos `.jpg` sueltos en disco.
+    * En [ExportModal.tsx](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/src/components/ExportModal.tsx), un pool de `OffscreenCanvas` comprime lotes de fotogramas a JPEG binario en paralelo (`convertToBlob` asíncrono; sin Worker explícito de composición, sin conversión a texto Base64 ni `JSON.stringify`) y actualiza la UI una sola vez por lote.
+    * En [mediaBackendPlugin.ts](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/server/mediaBackendPlugin.ts), `/api/export/frames` recibe el bloque binario crudo y lo inyecta directamente al pipe `stdin` del proceso `ffmpeg` acelerado por GPU (`/dev/dri/renderD128` con selección de `libx264` y recuperación parcial ante fallo del pipe), sin escribir miles de archivos `.jpg` sueltos en disco.
   * **Experiencia Circular Minimalista de Exportación (Estilo WeTransfer):**
-    * Al hacer clic en **Exportar**, el formulario en [ExportModal.tsx](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/src/components/ExportModal.tsx) se transforma en una tarjeta esbelta y centrada con un anillo circular estático orientado a las 12 en punto (`-rotate-90`) cuyo trazo cian (`#00d4e5`) se completa en sentido horario progresivo y fluido con `transition-[stroke-dashoffset] duration-300`, mostrando el porcentaje numérico grande en el centro (`58%`), el título `Exportando...`, el nombre del archivo y un botón píldora **`Cancelar`** (`/api/export/cancel` detiene inmediatamente el bucle y limpia el proceso FFmpeg).
+    * Al hacer clic en **Exportar**, el formulario en [ExportModal.tsx](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/src/components/ExportModal.tsx) se transforma en una tarjeta esbelta y centrada con un anillo circular estático orientado a las 12 en punto (`-rotate-90`) cuyo trazo cian (`#00d4e5`) se completa en sentido horario progresivo y fluido con `transition-[stroke-dashoffset] duration-300`, mostrando el porcentaje numérico grande en el centro (`58%`), el título `Exportando...`, el nombre del archivo y un botón píldora **`Cancelar`** (`/api/export/cancel` solicita detener el trabajo; la cobertura durante finalización y ante errores es incompleta).
     * Al finalizar (`100%`), la tarjeta pasa a **`¡Exportado con éxito!`** con un círculo de confirmación y el botón **`Abrir carpeta`** (`/api/fs/open-folder` abre el gestor de archivos nativo de Linux resaltando el video exportado).
   * El archivo `.mp4` resultante se entrega en espacio de color **`ITU-R BT.709` (`tv` range)** con metadatos completos (`colorspace=bt709`, `color_primaries=bt709`, `color_trc=bt709`), **`H.264 High Profile` (`-profile:v high -movflags +faststart`)** y audio **`AAC 192 kbps` a `48000 Hz` estéreo (`2 canales`)**.
 * **Modo Ocultar/Mostrar Línea de Tiempo (`Ctrl + .`):**
@@ -234,6 +258,7 @@ Este documento sirve como la fuente única de verdad (*Single Source of Truth*) 
   * **Duplicar** (`Ctrl + D`)
   * **Eliminar** (`Retroceso / Supr`)
   * **Audio independiente / Vincular audio** (`Ctrl + L`)
+  * **Re-vincular archivo...** *(destacado con ícono de enlace cuando el clip pertenece a un medio desconectado)*
 
 ### Etapa 5: Modo Vista en Pantalla Completa
 * Botón `[ ]` en la barra de la línea de tiempo que abre la previsualización a pantalla completa sobre fondo oscuro (`#18191c`), con barra inferior minimalista: **línea de progreso cian de ancho completo** con tirador circular blanco para *scrubbing*, botón Play blanco, código de tiempo (`00:11:15 | 00:25:00`) y botón para salir (`Esc`).
@@ -279,7 +304,7 @@ Este documento sirve como la fuente única de verdad (*Single Source of Truth*) 
 
 * **Arquitectura Híbrida Tauri v2 + Node Standalone:**
   * **Empaquetado Nativo (`src-tauri/`):** Configuración en Rust con Tauri v2 para compilar binarios nativos de escritorio para Linux (`.deb`, `.AppImage` o ejecutable binario).
-  * **Backend Independiente ([`server/standaloneServer.ts`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/server/standaloneServer.ts)):** Servidor Node empacado con `esbuild` en formato ESM (`dist-server/index.mjs`) que se ejecuta de forma autónoma con inicio instantáneo en menos de 15ms.
+  * **Backend Independiente ([`server/standaloneServer.ts`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/server/standaloneServer.ts)):** Servidor Node empacado con `esbuild` en formato ESM (`dist-server/index.mjs`) que se ejecuta de forma autónoma; la cifra histórica de inicio inferior a 15 ms no se ha revalidado.
   * **Comandos de ciclo de vida (`package.json`):**
     * `npm run desktop:dev`: Compila el servidor independiente y levanta la ventana nativa de Tauri en modo desarrollo con Hot Module Replacement (HMR).
     * `npm run desktop:build`: Empaqueta el servidor y construye el instalador nativo de Linux.
@@ -329,11 +354,11 @@ Este documento sirve como la fuente única de verdad (*Single Source of Truth*) 
 
 ---
 
-## 10. Fase 10: Optimización de Rendimiento y Renderizado Cero-Costo para WebKitGTK / Linux
+## 10. Fase 10: Optimización de Rendimiento para WebKitGTK / Linux
 
-* **Diagnóstico de Rendimiento en WebKitGTK:**
+* **Diagnóstico histórico de Rendimiento en WebKitGTK (no revalidado):**
   * En Linux, WebKitGTK carece de los optimizadores de composición por GPU presentes en Chromium (Skia), por lo que efectos como `backdrop-filter: blur(...)` o `box-shadow` difusos de 15px en elementos que cambian de tamaño provocan caídas drásticas de frames (a ~15-20 FPS) debido a rasterización por CPU.
-* **Eliminación de Efectos Pesados (Cero Costo GPU):**
+* **Reducción de Efectos Pesados:**
   * Marquee boxes limpios con borde de 1px y relleno semitransparente (`border-[#00d4e5] bg-[#00d4e5]/20`) sin sombras difusas.
   * Sustitución de `backdrop-blur-xs` en tarjetas por fondo oscuro puro semitransparente `bg-black/85`.
   * Restricción de transiciones a `transition-colors duration-75` para evitar interpolación continua de sombras durante la selección.
@@ -344,22 +369,22 @@ Este documento sirve como la fuente única de verdad (*Single Source of Truth*) 
   * Las pruebas de intersección se resuelven exclusivamente mediante comparaciones numéricas en memoria RAM, sin invocar `getBoundingClientRect()` ni `querySelectorAll()` dentro del bucle de movimiento.
 * **Sincronización con `requestAnimationFrame` (RAF Throttling):**
   * Los eventos de ratón se procesan como máximo una vez por fotograma de pantalla (60 Hz / 120 Hz).
-  * Diff previo de selección: el store de Zustand solo es notificado si el conjunto de IDs seleccionados cambió realmente respecto al fotograma anterior, logrando una fluidez constante a 60/120 FPS en Tauri.
+  * Diff previo de selección: el store de Zustand solo es notificado si el conjunto de IDs seleccionados cambió realmente respecto al fotograma anterior, con el objetivo histórico de fluidez a 60/120 FPS en Tauri, sin medición revalidada.
 
 ---
 
-## 11. Fase 11: Sistema Universal de Keyframes para Video y Audio (Completada)
+## 11. Fase 11: Sistema Universal de Keyframes para Video y Audio (Implementación con limitaciones)
 
 * **Descripción:**
-  Sistema unificado de animación y automatización paramétrica tanto para video (posición $X/Y$, escala, rotación, opacidad) como para audio (volumen). Se apoya en una función matemática pura de evaluación temporal (`keyframeEngine.ts`), coordenadas relativas al clip (`timeOffset`), curvas de interpolación (`linear`, `ease-in`, `ease-out`, `ease-in-out`, `hold`), integración con el inspector mediante rombos interactivos (`◇` / `◆`), renderizado en Canvas 2D con Gizmo interactivo y auto-keyframing, pipeline de audio en vivo a 60 FPS con Web Audio y exportación mediante expresiones dinámicas de FFmpeg (`volume=eval=frame`). En la línea de tiempo, los clips muestran marcadores romboidales interactivos (`◆`) y envolventes de volumen de tipo *rubber-band* directamente sobre la forma de onda de alta resolución.
-* **Objetivos Logrados:**
+  Sistema unificado de animación y automatización paramétrica tanto para video (posición $X/Y$, escala, rotación, opacidad) como para audio (volumen). Se apoya en una función matemática pura de evaluación temporal (`keyframeEngine.ts`), coordenadas relativas al clip (`timeOffset`), curvas de interpolación (`linear`, `ease-in`, `ease-out`, `ease-in-out`, `hold`), integración con el inspector mediante rombos interactivos (`◇` / `◆`), renderizado en Canvas 2D con Gizmo interactivo y auto-keyframing, pipeline de audio en vivo mediante elementos HTML de audio sincronizados con el playhead y exportación mediante expresiones dinámicas de FFmpeg (`volume=eval=frame`). En la línea de tiempo, los clips muestran marcadores romboidales interactivos (`◆`) y envolventes de volumen de tipo *rubber-band* directamente sobre la forma de onda de alta resolución.
+* **Capacidades presentes en el código (con límites indicados arriba):**
   1. **Motor Matemático Puro e Inmutable (`keyframeEngine.ts`):** Evaluación temporal eficiente con búsqueda binaria $O(\log N)$ para listas extensas de keyframes y deduplicación automática con ventana de tolerancia de 33ms (1 fotograma a 30 FPS).
-  2. **Acciones del Store Zustand e Historial Deshacer/Rehacer (`useProjectStore.ts`):** Mutaciones atómicas inmutables con soporte integral de Undo/Redo (`Ctrl+Z` / `Ctrl+Y`) para inserción, eliminación y limpieza de keyframes.
+  2. **Acciones del Store Zustand e Historial Deshacer/Rehacer (`useProjectStore.ts`):** Mutaciones atómicas inmutables con acciones integradas en Undo/Redo (`Ctrl+Z` / `Ctrl+Y`) para inserción, eliminación y limpieza de keyframes.
   3. **Composición Visual Canvas 2D y Auto-Keyframing en Gizmo (`CanvasPreviewStage.tsx`):** Interpolación continua en tiempo real de transformaciones y auto-inserción de keyframes en el cabezal al interactuar con el Gizmo o controles cuando una propiedad ya está animada.
-  4. **Pipeline Acústico de Audio en Vivo y Exportación FFmpeg (`mediaBackendPlugin.ts` & `ExportModal.tsx`):** Modulación de volumen por fotograma en Web Audio y generación de expresiones matemáticas de volumen compatibles con FFmpeg (`volume=eval=frame`), con anclaje temporal sincronizado con puntos In/Out.
+  4. **Pipeline Acústico de Audio en Vivo y Exportación FFmpeg (`mediaBackendPlugin.ts` & `ExportModal.tsx`):** Actualización de `HTMLAudioElement.volume` sincronizada con el playhead y generación de expresiones matemáticas de volumen compatibles con FFmpeg (`volume=eval=frame`), con limitaciones de conservación de la curva al exportar rangos In/Out.
   5. **Controles Profesionales en el Inspector (`KeyframeControlGroup.tsx`):** Navegación temporal precisa (`‹` y `›`), rombo interactivo reactivo (`◇` / `◆`) para Opacidad, Escala, Posición $X/Y$ vinculada y Rotación en `TransformSection`, y para Volumen en `AudioInspector`.
   6. **Marcadores Romboidales y Envolvente Rubber-Band en el Timeline (`ClipKeyframeMarkers.tsx` & `VolumeRubberBand.tsx`):** Visualización de rombos cian (`◆`) en clips, resaltado brillante activo con el cabezal, clic directo para salto temporal, y curva continua de volumen SVG interactiva trazada sobre la forma de onda de audio con creación de keyframes por doble clic.
-  7. Especificación detallada y registro de etapas documentados en [`FASE_11.md`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/FASE_11.md).
+  7. Especificación detallada y registro de etapas documentados en [`docs/FASE_11.md`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/docs/FASE_11.md).
 * **Refinamientos y Mejoras de Usabilidad Post-Implementación:**
   * **Preservación Acústica de la Curva en Doble Clic:** Corrección del orden de argumentos en `evaluatePropertyAtTime` en [`VolumeRubberBand.tsx`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/src/components/timeline/VolumeRubberBand.tsx) (`defaultVolume` antes de `timeOffset`), erradicando picos de volumen accidentales (como 934% al cliquear en 9.34s) y asegurando que un nuevo punto adopte fielmente el nivel de volumen interpolado en ese instante.
   * **Alineación Milimétrica y Supresión de Desfases:** Eliminación del margen `inset-x-1` (4px) en los contenedores de `VolumeRubberBand` y `AudioWaveformCanvas`, sincronizando la línea del cabezal de reproducción exactamente con el centro del rombo en la envolvente.
@@ -368,13 +393,89 @@ Este documento sirve como la fuente única de verdad (*Single Source of Truth*) 
 
 ---
 
-## 12. Fase 12: Visualización de Formas de Onda de Audio de Alta Definición (Completada)
+## 12. Fase 12: Visualización de Formas de Onda de Audio de Alta Definición (Implementada con límites de muestreo y tamaño)
 
 * **Descripción:**
-  Reemplazo de la representación preliminar de 60 barras estáticas `<div>` por un sistema profesional de renderizado en `<canvas>` 2D de alta resolución (HiDPI) alimentado por un muestreo de alta densidad en el backend (50 picos/segundo vía streaming con FFmpeg). La visualización responde con precisión milimétrica al nivel de zoom del timeline y a los recortes de inicio y fin del clip (`sourceStart` y `duration`).
-* **Objetivos Principales:**
+  Reemplazo de la representación preliminar de 60 barras estáticas `<div>` por un sistema profesional de renderizado en `<canvas>` 2D de alta resolución (HiDPI) alimentado por un muestreo de alta densidad en el backend (objetivo de 50 picos/segundo, mínimo 120 y máximo 15.000; PCM acumulado mediante `execFile`). La visualización proyecta la ventana de `sourceStart` y `duration` al ancho del clip según el zoom; su detalle está limitado por los picos disponibles y el tamaño del canvas.
+* **Objetivos Principales (criterios de diseño, sin garantía de precisión absoluta o rendimiento ilimitado):**
   1. **Fidelidad y Precisión Temporal al Recortar:** Proyección exacta de la ventana recortada de audio `[sourceStart ... sourceStart + duration]` sobre la forma de onda, permitiendo cortes quirúrgicos al compás de la música o la locución.
   2. **Escalabilidad Dinámica al Zoom:** Adaptación continua del nivel de detalle visual a cualquier factor de zoom sin deformar la onda ni provocar pixelación en pantallas Retina/HiDPI.
-  3. **Rendimiento Cero-Costo en WebKitGTK / Linux:** Supresión de cientos de nodos HTML `<div>` del DOM, reemplazándolos por una textura única de Canvas 2D acelerada por hardware.
+  3. **Reducción de nodos DOM en WebKitGTK / Linux:** Supresión de cientos de nodos HTML `<div>` del DOM, reemplazándolos por un Canvas 2D HiDPI por clip, cuyo tamaño crece con duración y zoom; no se garantiza aceleración efectiva ni costo nulo.
   4. **Sinergia con Fase 11 (Keyframes):** Servir como lienzo base idóneo para superponer las líneas de envolvente de volumen (*rubber-bands*) y los nodos romboidales de keyframes en clips de audio.
-  5. Especificación técnica y algoritmo de trazado documentados en [`FASE_12.md`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/FASE_12.md).
+  5. Especificación técnica y algoritmo de trazado documentados en [`docs/FASE_12.md`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/docs/FASE_12.md).
+
+---
+
+## 13. Fase 13: Detección de Media Offline, Advertencia Visual y Re-vinculación Inteligente (Implementación con limitaciones)
+
+* **Descripción:**
+  Sistema integral de detección de integridad de medios y re-vinculación asistida para archivos movidos, renombrados o eliminados localmente del disco. Su objetivo original es evitar ausencias silenciosas; implementa señalización técnica en la línea de tiempo y la biblioteca, una tarjeta de advertencia cinematográfica "MEDIA OFFLINE" renderizada directamente en el motor de Canvas 2D, una herramienta modal de re-vinculación asistida por el explorador interno de la aplicación ([`LocalFileBrowserModal.tsx`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/src/components/LocalFileBrowserModal.tsx)) con búsqueda en cascada por coincidencia de nombre entre assets ya marcados offline, y protección preventiva en la exportación de video.
+* **Capacidades presentes en el código (con límites indicados arriba):**
+  1. **Backend No Bloqueante de Comprobación y Re-vinculación (`server/mediaBackendPlugin.ts`):**
+     * Endpoint `/api/media/check-status`: Comprobación masiva y asíncrona mediante `fs.promises.stat`, sin medición revalidada de latencia o saturación.
+     * Endpoint `/api/media/relink`: Inspección técnica del nuevo archivo mediante FFprobe para actualizar metadatos (dimensiones, duración, fps, miniatura y forma de onda) preservando intactos los IDs de assets y clips.
+  2. **Store Central y Detección Reactiva (`src/store/useProjectStore.ts`):**
+     * Estado reactivo `offlineAssetIds: string[]`, `isRelinkModalOpen: boolean` y `relinkTargetAssetId: string | null`.
+     * Ejecución automática de `checkProjectMediaStatus(true)` al abrir proyectos (`openProject`), desplegando de inmediato el modal de re-vinculación si se detectan ausencias.
+     * Acción atómica `relinkAsset(assetId, newPath, autoScanSiblings)` con auto-escaneo en cascada: al re-vincular un archivo, comprueba rutas candidatas en la carpeta seleccionada usando `asset.name`; los reprobes fallidos pueden quedar sin resolver.
+  3. **Señalización Visual Cinematográfica en Interfaz:**
+     * **Línea de Tiempo ([`src/components/TimelinePanel.tsx`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/src/components/TimelinePanel.tsx)):** Clips con medios offline reciben borde de advertencia bermellón (`border-red-500/80`), fondo carbón oscuro técnico (`bg-[#38161c]`), badge `⚠️ Offline` junto al nombre y opción contextual *"Re-vincular archivo..."*.
+     * **Biblioteca de Medios ([`src/components/EditorWorkspace.tsx`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/src/components/EditorWorkspace.tsx)):** Banner superior de advertencia *"⚠️ X archivo(s) no encontrado(s) — [Re-vincular]"*, badge `⚠️ Offline` en miniaturas y botón directo `[🔗]` al pasar el cursor.
+  4. **Cartel Técnico "MEDIA OFFLINE" en Canvas 2D ([`src/components/CanvasPreviewStage.tsx`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/src/components/CanvasPreviewStage.tsx)):**
+     * En lugar de una pantalla negra vacía o fallos de renderizado, `drawSingleClipToContext` dibuja una tarjeta de aviso técnico con estética de monitor de estudio:
+       * Contenedor carbón `#141518` con bordes redondeados y contorno bermellón `#ef4444`.
+       * Franja superior de peligro `#dc2626`.
+       * Título `⚠ MEDIA OFFLINE` en tipografía TikTok Sans negrita.
+       * Nombre del archivo y última ruta registrada con truncado inteligente en píxeles.
+       * Leyenda de ayuda: *"Clic derecho en el clip para re-vincular"*.
+       * Respeta 100% las transformaciones espaciales del clip (posición $X, Y$, escala y rotación en el lienzo).
+  5. **Modal de Re-vinculación Integrado ([`src/components/RelinkModal.tsx`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/src/components/RelinkModal.tsx) & [`src/components/LocalFileBrowserModal.tsx`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/src/components/LocalFileBrowserModal.tsx)):**
+     * Componente modal limpio con estética *glassmorphism* que lista los archivos desconectados y permite localizarlos con un clic.
+     * Integración directa con el explorador nativo interno de VOSTOK (`LocalFileBrowserModal`) pre-posicionado en la carpeta de origen (`path.dirname(asset.path)`).
+     * Casilla activa por defecto: `☑ Buscar automáticamente otros archivos faltantes en la misma carpeta`.
+     * Retroalimentación visual instantánea con reporte de cantidad de archivos recuperados en cascada y pantalla de confirmación exitosa cuando no quedan ausencias.
+  6. **Protección Preventiva en Exportación ([`src/components/ExportModal.tsx`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/src/components/ExportModal.tsx)):**
+     * Consulta de los clips dependientes de la lista conocida `offlineAssetIds`, sin revalidación de disco antes de exportar.
+     * Banner informativo en la configuración con botón de re-vinculación directa.
+     * Al pulsar *"Exportar"*, despliega un diálogo de confirmación preventiva con 3 opciones claras: *"Re-vincular archivos ahora"*, *"Exportar de todos modos (Borrador)"* y *"Volver a la configuración"*.
+  7. Especificación técnica completa y registro de etapas documentados en [`docs/FASE_13.md`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/docs/FASE_13.md).
+
+---
+
+## 14. Fase 14: Base de verificación aislada y herramientas explícitas (Implementada y Verificada)
+
+* **Descripción:**
+  Establecimiento de una infraestructura reproducible y aislada de pruebas unitarias y de integración para el backend y el store, junto con la declaración directa de las herramientas de compilación. Elimina la ejecución de scripts sobre rutas y datos de usuario y previene regresiones mediante guardas activas.
+* **Capacidades implementadas y verificadas:**
+  1. **Herramienta de Build Directa (F24 Resuelto):**
+     * `esbuild` declarado explícitamente en `devDependencies` de `package.json` y sincronizado en el lockfile (`^0.25.12`).
+     * Instalación limpia (`npm ci`) y compilación del servidor (`npm run build:server`) comprobadas de forma reproducible en entorno limpio y aislado.
+  2. **Aislamiento Configurable del Backend y Red (F22 Base):**
+     * Módulo `server/storageConfig.ts` con redirección vía variables de entorno (`VIDEO_EDITOR_TEST_DATA_DIR`, `VIDEO_EDITOR_TEST_CACHE_DIR`, `VIDEO_EDITOR_TEST_SANDBOX_ROOT`).
+     * Modo de prueba estricto (`VIDEO_EDITOR_TEST_MODE='1'`) que aborta el arranque del backend ante configuraciones incompletas o sospechosas, impidiendo cualquier acceso silencioso a `~/.local/share/video-editor`.
+     * Guardas de red en `tests/helpers/network.ts`: bloqueo de puertos TCP ajenos (incluido el puerto de producción `45173`) y reescritura de peticiones HTTP del store a puertos efímeros locales.
+  3. **Runner y Suite Automatizada:**
+     * Runner en `scripts/run-tests.mjs` invocable mediante `npm test` y comprobación estática con `npm run test:types`.
+     * Migración completa de los scripts históricos de keyframes y audio (`stage1` a `stage6` y `verify_phase12`) a pruebas estructuradas bajo `tests/` con comprobación de efectos finales en disco y renderizado SSR.
+  4. Especificación técnica y registro de la fase documentados en [`docs/FASE_14.md`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/docs/FASE_14.md).
+
+---
+
+## 15. Fase 15: Blindaje Práctico de Persistencia, Fidelidad Visual y Exportación (Implementada y Verificada)
+
+* **Descripción:**
+  Conjunto de mejoras quirúrgicas enfocadas en la integridad del trabajo del usuario y la correspondencia exacta entre la previsualización del editor y el video exportado.
+* **Capacidades implementadas y verificadas:**
+  1. **Persistencia Atómica y Cola Monotónica de Autoguardado (F01, F03, F16):**
+     * En [`server/mediaBackendPlugin.ts`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/server/mediaBackendPlugin.ts), `POST /api/projects` valida la estructura base y escribe primero en un archivo temporal (`project.json.<pid>.<ts>.tmp`) antes de ejecutar `fs.renameSync` atómico sobre `project.json`, evitando corrupción por cierres abruptos. `DELETE /api/projects/:id` valida estrictamente el identificador y la contención en `PROJECTS_DIR`.
+     * En [`src/store/useProjectStore.ts`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/src/store/useProjectStore.ts), `enqueueProjectSave` serializa las peticiones de guardado y utiliza un contador de revisión (`latestSaveRevision`) para que una respuesta HTTP anterior nunca sobrescriba ediciones posteriores en memoria ni en disco.
+  2. **Catálogo Unificado de Transiciones y Audio Vinculado en Inspector (F07, F08, F14):**
+     * En [`src/components/inspector/VideoInspector.tsx`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/src/components/inspector/VideoInspector.tsx) y [`src/components/CanvasPreviewStage.tsx`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/src/components/CanvasPreviewStage.tsx), se unificaron los identificadores de transición con `TransitionType` (`crossfade`, `fade-black`, `slide-left`, `wipe-left`, `wipe-right`, `zoom`) y se añadió `normalizeTransitionType` para compatibilidad con proyectos antiguos (`dipToBlack`, `slideLeft`, `wipe`).
+     * La pestaña de audio de `VideoInspector` resuelve automáticamente el clip de audio vinculado (`linkGroupId`), y el pool de elementos multimedia invalida y recrea el recurso si cambia `asset.url` tras re-vincular.
+  3. **Fidelidad de Exportación en 720p, Imágenes en Tauri y Errores de Audio (F09, F10, F12, F18):**
+     * En [`src/components/CanvasPreviewStage.tsx`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/src/components/CanvasPreviewStage.tsx), `getCanvasResolutionScale` escala proporcionalmente posiciones $(X, Y)$, tipografías, bordes, espaciado y tarjetas técnicas al renderizar en resoluciones distintas a 1080p (como 720p).
+     * En [`src/components/ExportModal.tsx`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/src/components/ExportModal.tsx), la carga de imágenes usa `apiUrl(asset.url)` para funcionar en Tauri, se omiten pistas ocultas o medios marcados offline del decodificador FFmpeg para permitir exportar borradores con el cartel técnico, y se cancela el trabajo en el backend si ocurre un fallo a mitad del proceso.
+     * En [`server/mediaBackendPlugin.ts`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/server/mediaBackendPlugin.ts), `/api/export/finalize` reporta un error HTTP 500 explícito si falla la mezcla de audio con FFmpeg en lugar de entregar silenciosamente un MP4 sin sonido.
+     * **Soporte de Transparencia (Canal Alpha) en Exportación de Videos (`.mov` ProRes 4444 / `yuva*` / `rgba`):** `/api/export/decode-clip-frames` detecta automáticamente mediante `ffprobe` si el video posee canal Alpha (`isAlphaPixelFormat` / `ProRes 4444`) y conmuta la decodificación `image2pipe` a `PNG` (`rgba`) anunciando `X-Frame-Mime: image/png` (manteniendo `MJPEG` para videos opacos). `SequentialVideoFrameReader` (`extractNextImageFrameFromBuffer`) delimita los paquetes PNG hasta el bloque `IEND` y construye los `ImageBitmap` con transparencia intacta para el compositor Canvas.
+  4. **Suite de Regresión Automatizada:**
+     * Verificado mediante [`tests/projects/practical-hardening-phase15.test.ts`](file:///home/vladivostok/Documentos/EDITOR%20DE%20VIDEO/tests/projects/practical-hardening-phase15.test.ts) (23 suites, 87 tests en total sin fallos).

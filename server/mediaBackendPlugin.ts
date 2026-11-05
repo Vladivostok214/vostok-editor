@@ -7,6 +7,7 @@ import { promisify } from 'node:util';
 import type { Plugin, ViteDevServer } from 'vite';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { buildFFmpegVolumeExpression } from '../src/lib/keyframeEngine';
+import { resolveStorageDirs } from './storageConfig';
 
 const execFileAsync = promisify(execFile);
 
@@ -25,10 +26,12 @@ interface ActiveExportJob {
 
 const activeExportJobs = new Map<string, ActiveExportJob>();
 
-const APP_DATA_DIR = path.join(os.homedir(), '.local', 'share', 'video-editor');
+const STORAGE = resolveStorageDirs();
+const APP_DATA_DIR = STORAGE.appDataDir;
 const PROJECTS_DIR = path.join(APP_DATA_DIR, 'projects');
 const EXPORTS_DIR = path.join(APP_DATA_DIR, 'exports');
-const TEMP_CACHE_DIR = path.join(os.tmpdir(), 'video-editor-cache');
+const TEMP_CACHE_DIR = STORAGE.tempCacheDir;
+const HOME_DIR = STORAGE.homeDir;
 
 const SUPPORTED_VIDEO_EXTS = ['.mp4', '.mkv', '.mov', '.webm', '.avi', '.m4v'];
 const SUPPORTED_AUDIO_EXTS = ['.mp3', '.wav', '.ogg', '.flac', '.m4a', '.aac'];
@@ -112,7 +115,7 @@ async function getFfmpegVersion(): Promise<{ ffmpeg: string; ffprobe: string; av
   }
 }
 
-async function extractWaveformPeaks(filePath: string, samplesCount = 120): Promise<number[]> {
+export async function extractWaveformPeaks(filePath: string, samplesCount = 120): Promise<number[]> {
   return new Promise((resolve) => {
     const proc = execFile(
       'ffmpeg',
@@ -184,6 +187,33 @@ async function generateThumbnailDataUrl(filePath: string, seekTime = 0.5): Promi
   return undefined;
 }
 
+const ALPHA_PIX_FMT_PATTERN = /^(yuva|rgba|bgra|argb|abgr|gbra|ya\d|pal8)/i;
+
+export function isAlphaPixelFormat(pixFmt?: string): boolean {
+  if (!pixFmt || typeof pixFmt !== 'string') return false;
+  return ALPHA_PIX_FMT_PATTERN.test(pixFmt.trim());
+}
+
+async function detectVideoHasAlpha(filePath: string): Promise<boolean> {
+  try {
+    const { stdout } = await execFileAsync('ffprobe', [
+      '-v', 'error',
+      '-select_streams', 'v:0',
+      '-show_entries', 'stream=pix_fmt,codec_name,profile',
+      '-of', 'json',
+      filePath,
+    ]);
+    const info = JSON.parse(stdout);
+    const stream = info?.streams?.[0];
+    if (!stream) return false;
+    if (isAlphaPixelFormat(stream.pix_fmt)) return true;
+    if (String(stream.profile || '').includes('4444')) return true;
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 async function probeMediaFile(filePath: string) {
   const stat = fs.statSync(filePath);
   const ext = path.extname(filePath).toLowerCase();
@@ -242,7 +272,7 @@ async function probeMediaFile(filePath: string) {
 }
 
 function getCommonShortcuts() {
-  const home = os.homedir();
+  const home = HOME_DIR;
   const candidates = [
     { label: 'Carpeta Personal', path: home },
     { label: 'Videos', path: path.join(home, 'Vídeos') },
@@ -283,6 +313,7 @@ export async function handleMediaBackendRequest(
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', '*');
+  res.setHeader('Access-Control-Expose-Headers', 'X-Frame-Mime');
 
   if (req.method === 'OPTIONS') {
     res.statusCode = 204;
@@ -350,7 +381,7 @@ export async function handleMediaBackendRequest(
           // 3. Browse Local Linux File System
           if (pathname === '/api/fs/browse' && req.method === 'GET') {
             ensureDirectories();
-            const requestedDir = parsedUrl.searchParams.get('dir') || os.homedir();
+            const requestedDir = parsedUrl.searchParams.get('dir') || HOME_DIR;
             const resolvedDir = path.resolve(requestedDir);
 
             if (!fs.existsSync(resolvedDir) || !fs.statSync(resolvedDir).isDirectory()) {
@@ -421,7 +452,7 @@ export async function handleMediaBackendRequest(
               return sendJson(res, 400, { error: 'Nombre de carpeta inválido' });
             }
 
-            const baseDir = path.resolve(String(rawParentDir || os.homedir()));
+            const baseDir = path.resolve(String(rawParentDir || HOME_DIR));
             if (!fs.existsSync(baseDir) || !fs.statSync(baseDir).isDirectory()) {
               return sendJson(res, 404, { error: 'La carpeta contenedora no existe' });
             }
@@ -466,24 +497,50 @@ export async function handleMediaBackendRequest(
             return sendJson(res, 200, { projects, projectsDir: PROJECTS_DIR });
           }
 
-          // 5. Create or Save Project
+          // 5. Create or Save Project (Escritura atómica y validación de ID)
           if (pathname === '/api/projects' && req.method === 'POST') {
             ensureDirectories();
             const body = await readJsonBody(req);
-            if (!body || !body.id) {
+            if (!body || typeof body !== 'object' || !body.id) {
               return sendJson(res, 400, { error: 'Project ID is required' });
             }
             const safeId = String(body.id).replace(/[^a-zA-Z0-9_-]/g, '');
+            if (!safeId || !/^[a-zA-Z0-9_-]{1,128}$/.test(safeId)) {
+              return sendJson(res, 400, { error: 'Identificador de proyecto inválido' });
+            }
             const projFolder = path.join(PROJECTS_DIR, safeId);
             fs.mkdirSync(projFolder, { recursive: true });
 
             const updatedProject = {
               ...body,
               id: safeId,
+              name: typeof body.name === 'string' && body.name.trim() ? body.name : 'Proyecto sin título',
+              aspectRatio: body.aspectRatio === '9:16' || body.aspectRatio === '1:1' ? body.aspectRatio : '16:9',
+              fps: typeof body.fps === 'number' && body.fps > 0 ? body.fps : 30,
+              assets: Array.isArray(body.assets) ? body.assets : [],
+              tracks: Array.isArray(body.tracks) ? body.tracks : [],
+              clips: Array.isArray(body.clips) ? body.clips : [],
               updatedAt: new Date().toISOString(),
             };
             const projFile = path.join(projFolder, 'project.json');
-            fs.writeFileSync(projFile, JSON.stringify(updatedProject, null, 2), 'utf-8');
+            const tmpFile = path.join(
+              projFolder,
+              `project.json.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 7)}.tmp`
+            );
+            const serialized = JSON.stringify(updatedProject, null, 2);
+            try {
+              fs.writeFileSync(tmpFile, serialized, 'utf-8');
+              fs.renameSync(tmpFile, projFile);
+            } catch (writeErr) {
+              if (fs.existsSync(tmpFile)) {
+                try {
+                  fs.unlinkSync(tmpFile);
+                } catch {
+                  // ignore cleanup error
+                }
+              }
+              throw writeErr;
+            }
             const stat = fs.statSync(projFile);
 
             return sendJson(res, 200, {
@@ -494,15 +551,58 @@ export async function handleMediaBackendRequest(
             });
           }
 
-          // 6. Delete Project
-          if (pathname.startsWith('/api/projects/') && req.method === 'DELETE') {
-            const rawId = pathname.replace('/api/projects/', '');
-            const safeId = rawId.replace(/[^a-zA-Z0-9_-]/g, '');
-            const projFolder = path.join(PROJECTS_DIR, safeId);
-            if (fs.existsSync(projFolder)) {
-              fs.rmSync(projFolder, { recursive: true, force: true });
+          // 6. Delete Project (Protegido contra F01)
+          if ((pathname === '/api/projects' || pathname.startsWith('/api/projects/')) && req.method === 'DELETE') {
+            ensureDirectories();
+
+            // Extraer el identificador posterior a /api/projects/
+            const rawId = pathname.startsWith('/api/projects/')
+              ? pathname.slice('/api/projects/'.length)
+              : '';
+
+            // Decodificación de URL para evaluar el ID real solicitado
+            let decodedId: string;
+            try {
+              decodedId = decodeURIComponent(rawId);
+            } catch {
+              return sendJson(res, 400, { error: 'Identificador de proyecto mal codificado' });
             }
-            return sendJson(res, 200, { ok: true, deletedId: safeId });
+
+            // Validación estricta del ID: no vacío, alfanumérico + guión/guión bajo, sin traversal ni separadores
+            if (!decodedId || !/^[a-zA-Z0-9_-]{1,128}$/.test(decodedId)) {
+              return sendJson(res, 400, { error: 'Identificador de proyecto inválido o ausente' });
+            }
+
+            const canonicalProjectsDir = path.resolve(PROJECTS_DIR);
+            const projFolder = path.resolve(canonicalProjectsDir, decodedId);
+
+            // Comprobar contención estricta: debe ser hijo directo y jamás PROJECTS_DIR
+            if (path.dirname(projFolder) !== canonicalProjectsDir || projFolder === canonicalProjectsDir) {
+              return sendJson(res, 400, { error: 'Ruta de proyecto no autorizada' });
+            }
+
+            // Comprobar existencia y tipo mediante lstat (no sigue enlaces simbólicos)
+            let stat: fs.Stats;
+            try {
+              stat = fs.lstatSync(projFolder);
+            } catch (err: any) {
+              if (err?.code === 'ENOENT') {
+                return sendJson(res, 404, { error: `Proyecto no encontrado: ${decodedId}` });
+              }
+              throw err;
+            }
+
+            // Rechazar enlaces simbólicos como directorio de proyecto
+            if (stat.isSymbolicLink()) {
+              return sendJson(res, 400, { error: 'El proyecto no puede ser un enlace simbólico' });
+            }
+
+            if (!stat.isDirectory()) {
+              return sendJson(res, 400, { error: 'La ruta del proyecto no es un directorio válido' });
+            }
+
+            fs.rmSync(projFolder, { recursive: true, force: true });
+            return sendJson(res, 200, { ok: true, deletedId: decodedId });
           }
 
           // 7. Probe Single or Multiple Local Files
@@ -546,6 +646,74 @@ export async function handleMediaBackendRequest(
               : Math.max(120, Math.min(15000, Math.round(durationParam * 50) || 500));
             const peaks = await extractWaveformPeaks(filePath, targetSamples);
             return sendJson(res, 200, { waveform: peaks });
+          }
+
+          // 7c. Batch Media Assets Existence Status Check (Non-blocking)
+          if (pathname === '/api/media/check-status' && req.method === 'POST') {
+            const body = await readJsonBody(req);
+            const assetsToCheck: { id: string; path: string }[] = Array.isArray(body.assets)
+              ? body.assets
+              : [];
+            const pathsToCheck: string[] = Array.isArray(body.paths)
+              ? body.paths
+              : [];
+
+            const status: Record<string, { exists: boolean; sizeBytes?: number; mtimeMs?: number }> = {};
+
+            await Promise.all([
+              ...assetsToCheck.map(async (item) => {
+                if (!item || !item.id || !item.path) return;
+                try {
+                  const stat = await fs.promises.stat(item.path);
+                  status[item.id] = {
+                    exists: stat.isFile(),
+                    sizeBytes: stat.size,
+                    mtimeMs: stat.mtimeMs,
+                  };
+                } catch {
+                  status[item.id] = { exists: false };
+                }
+              }),
+              ...pathsToCheck.map(async (p) => {
+                if (!p || typeof p !== 'string') return;
+                try {
+                  const stat = await fs.promises.stat(p);
+                  status[p] = {
+                    exists: stat.isFile(),
+                    sizeBytes: stat.size,
+                    mtimeMs: stat.mtimeMs,
+                  };
+                } catch {
+                  status[p] = { exists: false };
+                }
+              }),
+            ]);
+
+            return sendJson(res, 200, { status });
+          }
+
+          // 7d. Re-probe & Relink Media Asset
+          if (pathname === '/api/media/relink' && req.method === 'POST') {
+            const body = await readJsonBody(req);
+            const { assetId, newPath } = body;
+            if (!newPath || typeof newPath !== 'string') {
+              return sendJson(res, 400, { error: 'No se proporcionó la nueva ruta del archivo' });
+            }
+
+            try {
+              const stat = await fs.promises.stat(newPath);
+              if (!stat.isFile()) {
+                return sendJson(res, 400, { error: 'La ruta indicada no es un archivo válido' });
+              }
+            } catch {
+              return sendJson(res, 404, { error: `El archivo no existe en la ruta: ${newPath}` });
+            }
+
+            const metadata = await probeMediaFile(newPath);
+            return sendJson(res, 200, {
+              assetId: assetId || undefined,
+              asset: metadata,
+            });
           }
 
           // 8. Upload Drop Fallback into Ephemeral Cache
@@ -645,26 +813,48 @@ export async function handleMediaBackendRequest(
               return;
             }
 
+            // Detectar si el video de origen posee canal Alpha (p. ej. ProRes 4444 yuva444p12le, WebM VP9 alpha, RGBA)
+            const hasAlpha = await detectVideoHasAlpha(filePath);
+            const frameMime = hasAlpha ? 'image/png' : 'image/jpeg';
+
             res.writeHead(200, {
               'Content-Type': 'application/octet-stream',
               'Cache-Control': 'no-store',
+              'X-Frame-Mime': frameMime,
+              'Access-Control-Expose-Headers': 'X-Frame-Mime',
             });
 
-            // Decodificación lineal pura multi-hilo con FFmpeg desde el I-Frame anterior:
-            // Cero re-decodificación de GOPs, emitiendo un flujo MJPEG continuo de alta velocidad
-            const ffArgs = [
-              '-hide_banner',
-              '-loglevel', 'error',
-              '-threads', '0',
-              '-ss', startSec.toFixed(3),
-              '-t', durationSec.toFixed(3),
-              '-i', filePath,
-              '-vf', `fps=${fps},scale='min(${maxW},iw)':'min(${maxH},ih)':force_original_aspect_ratio=decrease`,
-              '-f', 'image2pipe',
-              '-vcodec', 'mjpeg',
-              '-q:v', '2',
-              'pipe:1',
-            ];
+            // Decodificación lineal pura multi-hilo con FFmpeg:
+            // - Si el video tiene canal Alpha -> emite flujo PNG con formato rgba para conservar transparencia 100% intacta.
+            // - Si el video es opaco estándar -> emite flujo MJPEG continuo de alta velocidad.
+            const scaleFilter = `fps=${fps},scale='min(${maxW},iw)':'min(${maxH},ih)':force_original_aspect_ratio=decrease`;
+            const ffArgs = hasAlpha
+              ? [
+                  '-hide_banner',
+                  '-loglevel', 'error',
+                  '-threads', '0',
+                  '-ss', startSec.toFixed(3),
+                  '-t', durationSec.toFixed(3),
+                  '-i', filePath,
+                  '-vf', `${scaleFilter},format=rgba`,
+                  '-f', 'image2pipe',
+                  '-vcodec', 'png',
+                  '-compression_level', '1',
+                  'pipe:1',
+                ]
+              : [
+                  '-hide_banner',
+                  '-loglevel', 'error',
+                  '-threads', '0',
+                  '-ss', startSec.toFixed(3),
+                  '-t', durationSec.toFixed(3),
+                  '-i', filePath,
+                  '-vf', scaleFilter,
+                  '-f', 'image2pipe',
+                  '-vcodec', 'mjpeg',
+                  '-q:v', '2',
+                  'pipe:1',
+                ];
 
             const ffProc = spawn('ffmpeg', ffArgs);
             ffProc.stdout.pipe(res);
@@ -986,15 +1176,20 @@ export async function handleMediaBackendRequest(
                 );
                 try {
                   await execFileAsync('ffmpeg', muxArgs);
-                } catch {
-                  // Si alguna pista de audio falló, conservar el video ya codificado
-                  await execFileAsync('ffmpeg', [
-                    '-y',
-                    '-i', jobState.tempVideoOnlyPath,
-                    '-c:v', 'copy',
-                    '-movflags', '+faststart',
-                    outputPath,
-                  ]);
+                } catch (muxErr: any) {
+                  // F12: No silenciar errores de mezcla devolviendo un MP4 mudo como éxito
+                  fs.rmSync(jobDir, { recursive: true, force: true });
+                  if (fs.existsSync(outputPath)) {
+                    try {
+                      fs.unlinkSync(outputPath);
+                    } catch {
+                      // ignore cleanup error
+                    }
+                  }
+                  const detail = muxErr?.stderr || muxErr?.message || 'Fallo en el filtro de audio de FFmpeg';
+                  return sendJson(res, 500, {
+                    error: `Error al mezclar el audio durante la exportación: ${String(detail).slice(-300)}`,
+                  });
                 }
               }
             } else {
@@ -1068,12 +1263,24 @@ export async function handleMediaBackendRequest(
 
               try {
                 await execFileAsync('ffmpeg', buildFfmpegArgs(canTryVaapi, validAudioClips.length > 0));
-              } catch {
-                usedEncoder = 'libx264';
-                try {
-                  await execFileAsync('ffmpeg', buildFfmpegArgs(false, validAudioClips.length > 0));
-                } catch {
-                  await execFileAsync('ffmpeg', buildFfmpegArgs(false, false));
+              } catch (firstErr: any) {
+                if (canTryVaapi) {
+                  usedEncoder = 'libx264';
+                  try {
+                    await execFileAsync('ffmpeg', buildFfmpegArgs(false, validAudioClips.length > 0));
+                  } catch (cpuErr: any) {
+                    fs.rmSync(jobDir, { recursive: true, force: true });
+                    const detail = cpuErr?.stderr || cpuErr?.message || 'Error en codificación/mezcla FFmpeg';
+                    return sendJson(res, 500, {
+                      error: `Error al finalizar el video/audio con FFmpeg: ${String(detail).slice(-300)}`,
+                    });
+                  }
+                } else {
+                  fs.rmSync(jobDir, { recursive: true, force: true });
+                  const detail = firstErr?.stderr || firstErr?.message || 'Error en codificación/mezcla FFmpeg';
+                  return sendJson(res, 500, {
+                    error: `Error al finalizar el video/audio con FFmpeg: ${String(detail).slice(-300)}`,
+                  });
                 }
               }
             }

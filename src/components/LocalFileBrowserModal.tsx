@@ -21,6 +21,9 @@ interface LocalFileBrowserModalProps {
   initialDir?: string;
   onImportPaths?: (paths: string[]) => Promise<void>;
   onSelectDirectory?: (dirPath: string) => void;
+  title?: string;
+  confirmLabel?: string;
+  singleSelection?: boolean;
 }
 
 function formatBytes(bytes = 0): string {
@@ -38,6 +41,9 @@ export const LocalFileBrowserModal: React.FC<LocalFileBrowserModalProps> = ({
   initialDir,
   onImportPaths,
   onSelectDirectory,
+  title,
+  confirmLabel,
+  singleSelection = false,
 }) => {
   const [browseData, setBrowseData] = useState<FsBrowseResponse | null>(null);
   const [selectedPaths, setSelectedPaths] = useState<string[]>([]);
@@ -83,6 +89,10 @@ export const LocalFileBrowserModal: React.FC<LocalFileBrowserModalProps> = ({
   if (!isOpen) return null;
 
   const toggleFileSelection = (filePath: string) => {
+    if (singleSelection) {
+      setSelectedPaths((prev) => (prev.includes(filePath) ? [] : [filePath]));
+      return;
+    }
     setSelectedPaths((prev) =>
       prev.includes(filePath) ? prev.filter((p) => p !== filePath) : [...prev, filePath]
     );
@@ -138,13 +148,13 @@ export const LocalFileBrowserModal: React.FC<LocalFileBrowserModalProps> = ({
   );
 
   return (
-    <div className="fixed inset-0 z-[60] bg-black/75 backdrop-blur-xs flex items-center justify-center p-4 select-none">
+    <div className="fixed inset-0 z-[70] bg-black/75 backdrop-blur-xs flex items-center justify-center p-4 select-none">
       <div className="w-full max-w-4xl h-[560px] rounded-2xl bg-[#202124] border border-[#32343a] shadow-2xl flex flex-col overflow-hidden">
         {/* Header */}
         <div className="px-5 py-3.5 border-b border-[#2c2d32] bg-[#18191c] flex items-center justify-between">
           <h3 className="text-sm font-bold text-white flex items-center gap-2">
             <HardDrive className="w-4 h-4 text-[#00d4e5]" />
-            {mode === 'directory' ? 'Seleccionar carpeta de destino' : 'Cargar archivos'}
+            {title || (mode === 'directory' ? 'Seleccionar carpeta de destino' : 'Cargar archivos')}
           </h3>
 
           <div className="flex items-center gap-2">
@@ -442,7 +452,11 @@ export const LocalFileBrowserModal: React.FC<LocalFileBrowserModalProps> = ({
           ) : (
             <>
               <span className="text-xs text-gray-400">
-                {selectedPaths.length} seleccionado(s) · Doble clic para cargar al instante
+                {singleSelection
+                  ? selectedPaths.length > 0
+                    ? '1 archivo seleccionado · Doble clic para confirmar al instante'
+                    : 'Selecciona el archivo para re-vincular'
+                  : `${selectedPaths.length} seleccionado(s) · Doble clic para cargar al instante`}
               </span>
               <div className="flex items-center gap-2">
                 <button
@@ -458,7 +472,11 @@ export const LocalFileBrowserModal: React.FC<LocalFileBrowserModalProps> = ({
                   onClick={handleImportConfirmed}
                   className="px-5 py-1.5 rounded-lg text-xs font-semibold bg-[#00d4e5] hover:bg-[#19e3f3] text-[#141517] disabled:opacity-40 transition"
                 >
-                  Cargar ({selectedPaths.length})
+                  {confirmLabel
+                    ? selectedPaths.length > 0
+                      ? `${confirmLabel} (${selectedPaths.length})`
+                      : confirmLabel
+                    : `Cargar (${selectedPaths.length})`}
                 </button>
               </div>
             </>
